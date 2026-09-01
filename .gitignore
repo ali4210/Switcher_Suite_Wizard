@@ -1,0 +1,5 @@
+Switcher_Suite_Wizard
+Switcher_Suite_Wizard.exe
+bin/
+*.log
+.DS_Store
