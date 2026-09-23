@@ -48,10 +48,11 @@ Built for developers, sysadmins, and network engineers who live in the terminal 
 </table>
 
 > [!TIP]
-> **In 30 seconds:** clone the repo, run `./autorun.sh` (Linux/macOS) or right-click `autorun.bat` → *Run as administrator* (Windows). The wrapper self-provisions a Go toolchain if it can't find one, compiles the binary, and launches it elevated — automatically.
-
-> [!IMPORTANT]
-> Prefer PowerShell on Windows? Use **`autorun.ps1`** instead of the batch file — same build pipeline, native PowerShell elevation.
+> **First run:**
+> - 🐧 **Linux/macOS:** `./autorun.sh -f` or `./autorun.sh --hard`
+> - 🪟 **Windows:** right-click `autorun.bat` → *Run as administrator*, or run `.\autorun.ps1`. Launching from an elevated terminal instead? Use `autorun.bat -f` or `autorun.bat --hard`.
+>
+> The wrapper self-provisions a Go toolchain if it can't find one, compiles the binary, and launches it elevated — automatically. After the first run, plain `./autorun.sh` or `autorun.bat` is enough.
 
 ---
 
