@@ -1,9 +1,9 @@
 <div align="center">
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=230&section=header&text=Switcher%20Suite%20Wizard&fontSize=48&fontColor=ffffff&animation=fadeIn&desc=Your%20terminal-based%20control%20center%20for%20GUI%20%E2%86%94%20TTY%2C%20networking%20%26%20system%20control&descSize=18&descAlignY=70" alt="Switcher Suite Wizard banner" width="100%"/>
+<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=230&section=header&text=Switcher%20Suite%20Wizard&fontSize=48&fontColor=ffffff&animation=fadeIn&desc=Your%20terminal-based%20control%20center%20for%20GUI%20vs%20TTY%2C%20networking%20and%20system%20control&descSize=18&descAlignY=70" alt="Switcher Suite Wizard banner" width="100%"/>
 
 <a href="https://github.com/ali4210">
-  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&pause=1300&color=06B6D4&center=true&vCenter=true&width=760&lines=Switch+between+GUI+and+TTY+%2F+CLI+in+one+keystroke.;Manage+IPs%2C+DNS%2C+proxies+and+hostnames+from+one+menu.;Self-healing+network+diagnostics%2C+built+in.;Linux+%7C+Windows+%7C+macOS+%E2%80%94+one+Go+binary." alt="Typing animation" />
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&pause=1300&color=06B6D4&center=true&vCenter=true&width=760&lines=Switch+between+GUI+and+TTY+%2F+CLI+in+one+keystroke.;Manage+IPs%2C+DNS%2C+proxies+and+hostnames+from+one+menu.;Self-healing+network+diagnostics%2C+built+in.;Linux+%7C+Windows+%7C+macOS+-+one+Go+binary." alt="Typing animation" />
 </a>
 
 <br/>
@@ -17,8 +17,8 @@
 ![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white)
 
-![Stars](https://img.shields.io/github/stars/ali4210?style=flat-square)
-![Last commit](https://img.shields.io/github/last-commit/ali4210?style=flat-square)
+![Stars](https://img.shields.io/github/stars/ali4210/Switcher_Suite_Wizard?style=flat-square)
+![Last commit](https://img.shields.io/github/last-commit/ali4210/Switcher_Suite_Wizard?style=flat-square)
 
 **A single self-healing Go binary that turns low-level system administration — display mode switching, network configuration, and system identity — into a guided, keyboard-driven terminal UI.**
 
