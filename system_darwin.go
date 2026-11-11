@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -294,15 +295,26 @@ func getCurrentProxy() string {
 			}
 		}
 		if host != "" && port != "" {
-			return host + ":" + port
+			return net.JoinHostPort(host, port)
 		}
 	}
 
 	return "DIRECT (Disabled)"
 }
 
+// buildDarwinProxyEndpoint joins host and port into the single string used
+// for the saved proxy record, the display text, and the CLI-session
+// environment variable exports. Pure and side-effect-free so it can be
+// unit tested directly; net.JoinHostPort brackets IPv6 literals
+// (net.JoinHostPort("::1", "8080") == "[::1]:8080"), unlike plain
+// concatenation. networksetup itself keeps taking host and port as
+// separate arguments below -- it is not affected by this.
+func buildDarwinProxyEndpoint(host, port string) string {
+	return net.JoinHostPort(host, port)
+}
+
 func setSystemProxy(host, port string) string {
-	endpoint := host + ":" + port
+	endpoint := buildDarwinProxyEndpoint(host, port)
 	saveActiveProxyRecord(endpoint)
 
 	service := "Wi-Fi"
@@ -311,7 +323,9 @@ func setSystemProxy(host, port string) string {
 		service = getDarwinNetworkService(interfaces[0])
 	}
 
-	// 1. Configure networksetup for Web (HTTP) and Secure Web (HTTPS)
+	// 1. Configure networksetup for Web (HTTP) and Secure Web (HTTPS) --
+	// host and port stay separate arguments, matching networksetup's own
+	// argv-based interface.
 	_, _ = runCommand("networksetup", "-setwebproxy", service, host, port)
 	output, err := runCommand("networksetup", "-setsecurewebproxy", service, host, port)
 	if err != nil {

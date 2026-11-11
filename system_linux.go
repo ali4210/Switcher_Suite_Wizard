@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -420,7 +421,7 @@ func getCurrentProxy() string {
 			host := strings.Trim(strings.TrimSpace(hostOut), "'\"")
 			port := strings.TrimSpace(portOut)
 			if host != "" && port != "0" {
-				return host + ":" + port
+				return net.JoinHostPort(host, port)
 			}
 		}
 	}
@@ -449,11 +450,24 @@ func getCurrentProxy() string {
 	return "DIRECT (Disabled)"
 }
 
+// buildLinuxProxyEnvContent renders the exact /etc/environment /
+// /etc/environment.d / profile.d content for a given endpoint. Pure and
+// side-effect-free so it can be unit tested directly: endpoint is expected
+// to already be the net.JoinHostPort form (bracketed for IPv6), which is
+// also exactly what a URL needs for its host:port component.
+func buildLinuxProxyEnvContent(endpoint string) string {
+	return fmt.Sprintf(
+		"http_proxy=\"http://%s/\"\nhttps_proxy=\"http://%s/\"\nall_proxy=\"socks5://%s/\"\nHTTP_PROXY=\"http://%s/\"\nHTTPS_PROXY=\"http://%s/\"\nALL_PROXY=\"socks5://%s/\"\nno_proxy=\"localhost,127.0.0.1,localaddress,.localdomain.com\"\n",
+		endpoint, endpoint, endpoint, endpoint, endpoint, endpoint,
+	)
+}
+
 func setSystemProxy(host, port string) string {
-	endpoint := host + ":" + port
+	endpoint := net.JoinHostPort(host, port)
 	saveActiveProxyRecord(endpoint)
 
-	// 1. GNOME / XFCE Desktop Proxy Settings
+	// 1. GNOME / XFCE Desktop Proxy Settings -- host and port stay separate
+	// arguments here, matching the gsettings schema's own host/port keys.
 	if commandExists("gsettings") {
 		_, _ = runCommand("gsettings", "set", "org.gnome.system.proxy", "mode", "manual")
 		_, _ = runCommand("gsettings", "set", "org.gnome.system.proxy.http", "host", host)
@@ -463,7 +477,7 @@ func setSystemProxy(host, port string) string {
 	}
 
 	// 2. Global Linux Environment Configuration
-	envContent := fmt.Sprintf("http_proxy=\"http://%s:%s/\"\nhttps_proxy=\"http://%s:%s/\"\nall_proxy=\"socks5://%s:%s/\"\nHTTP_PROXY=\"http://%s:%s/\"\nHTTPS_PROXY=\"http://%s:%s/\"\nALL_PROXY=\"socks5://%s:%s/\"\nno_proxy=\"localhost,127.0.0.1,localaddress,.localdomain.com\"\n", host, port, host, port, host, port, host, port, host, port, host, port)
+	envContent := buildLinuxProxyEnvContent(endpoint)
 	if err := os.WriteFile("/etc/environment", []byte(envContent), 0644); err != nil {
 		return commandError("Failed to write /etc/environment", "", err)
 	}

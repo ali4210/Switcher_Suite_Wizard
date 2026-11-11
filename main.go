@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1573,7 +1574,7 @@ func testCurrentProxyFlow(activeProxy string) {
 		return
 	}
 
-	printBoxRow(" "+FgCyan+"[i] Probing active proxy endpoint "+FgBright+Bold+host+":"+port+Reset+" ...", "\n")
+	printBoxRow(" "+FgCyan+"[i] Probing active proxy endpoint "+FgBright+Bold+net.JoinHostPort(host, port)+Reset+" ...", "\n")
 	printBoxBlankRow("\n")
 
 	isAlive, details := probeProxyEndpoint(host, port)

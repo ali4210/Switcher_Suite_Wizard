@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -339,23 +340,45 @@ func setDNS(iface string, servers []string, automatic bool) string {
 	return outputOrSuccess(output, "Custom DNS servers ("+strings.Join(servers, ", ")+") applied to "+iface+".")
 }
 
+// buildWindowsProxyEndpoint joins host and port into the single string
+// used for the saved proxy record, the netsh proxy-server value, the
+// WinINET registry value, and the display text. Pure and side-effect-free
+// so it can be unit tested directly; net.JoinHostPort brackets IPv6
+// literals (net.JoinHostPort("::1", "8080") == "[::1]:8080"), matching the
+// bracket notation Windows proxy configuration already expects for IPv6.
+func buildWindowsProxyEndpoint(host, port string) string {
+	return net.JoinHostPort(host, port)
+}
+
+// buildWindowsNetshProxyArgs returns the exact argv passed to netsh to set
+// the WinHTTP system proxy to endpoint.
+func buildWindowsNetshProxyArgs(endpoint string) []string {
+	return []string{"winhttp", "set", "proxy", "proxy-server=" + endpoint}
+}
+
+// buildWindowsProxyRegistryScript returns the PowerShell script that
+// writes endpoint into the WinINET registry key at regPath.
+func buildWindowsProxyRegistryScript(regPath, endpoint string) string {
+	return fmt.Sprintf(`
+		Set-ItemProperty -Path "%s" -Name ProxyEnable -Value 1
+		Set-ItemProperty -Path "%s" -Name ProxyServer -Value "%s"
+		Set-ItemProperty -Path "%s" -Name ProxyOverride -Value "<local>;localhost;127.0.0.1"
+	`, regPath, regPath, endpoint, regPath)
+}
+
 func setSystemProxy(host, port string) string {
-	endpoint := host + ":" + port
+	endpoint := buildWindowsProxyEndpoint(host, port)
 	saveActiveProxyRecord(endpoint)
 
 	// 1. Configure System-Level WinHTTP (Services, CLI, PowerShell, Background Updates)
-	output, err := runCommand("netsh", "winhttp", "set", "proxy", "proxy-server="+endpoint)
+	output, err := runCommand("netsh", buildWindowsNetshProxyArgs(endpoint)...)
 	if err != nil {
 		return commandError("Failed to configure WinHTTP system proxy", output, err)
 	}
 
 	// 2. Configure User Profile & Browser Layer (WinINET -> Chrome, Edge, Brave)
 	regPath := `HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-	psScript := fmt.Sprintf(`
-		Set-ItemProperty -Path "%s" -Name ProxyEnable -Value 1
-		Set-ItemProperty -Path "%s" -Name ProxyServer -Value "%s"
-		Set-ItemProperty -Path "%s" -Name ProxyOverride -Value "<local>;localhost;127.0.0.1"
-	`, regPath, regPath, endpoint, regPath)
+	psScript := buildWindowsProxyRegistryScript(regPath, endpoint)
 	_, _ = runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
 
 	return Green +

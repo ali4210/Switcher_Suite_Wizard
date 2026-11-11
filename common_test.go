@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -601,6 +602,39 @@ func TestActiveProxyRecordRoundTrip(t *testing.T) {
 	if got := getActiveProxyRecord(); got != "" {
 		t.Errorf("getActiveProxyRecord() after remove = %q, want empty", got)
 	}
+}
+
+// TestActiveProxyRecordRoundTrip_IPv6 exercises the full pipeline a real
+// "set proxy" -> "test current proxy" cycle goes through: build the
+// endpoint with net.JoinHostPort (what setSystemProxy now does), save it,
+// read it back, and re-parse it with parseAndValidateProxy (what
+// testCurrentProxyFlow does with whatever getCurrentProxy returns) --
+// confirming the bracketed IPv6 form survives the save/load/parse cycle
+// intact.
+func TestActiveProxyRecordRoundTrip_IPv6(t *testing.T) {
+	withTempCWD(t)
+
+	endpoint := net.JoinHostPort("::1", "8080")
+	if endpoint != "[::1]:8080" {
+		t.Fatalf("net.JoinHostPort(%q, %q) = %q, want %q", "::1", "8080", endpoint, "[::1]:8080")
+	}
+
+	saveActiveProxyRecord(endpoint)
+
+	rec := getActiveProxyRecord()
+	if rec != endpoint {
+		t.Fatalf("getActiveProxyRecord() = %q, want %q", rec, endpoint)
+	}
+
+	host, port, err := parseAndValidateProxy(rec)
+	if err != nil {
+		t.Fatalf("parseAndValidateProxy(%q) unexpected error: %v", rec, err)
+	}
+	if host != "::1" || port != "8080" {
+		t.Errorf("parseAndValidateProxy(%q) = (%q,%q), want (%q,%q)", rec, host, port, "::1", "8080")
+	}
+
+	removeActiveProxyRecord()
 }
 
 // ---------------------------------------------------------------------------
