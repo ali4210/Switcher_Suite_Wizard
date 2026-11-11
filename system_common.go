@@ -99,6 +99,162 @@ func validateCliCommand(cmdName string) error {
 	return nil
 }
 
+// reservedCliCommands blocks well-known system/shell command names from
+// ever being claimed as a Global CLI alias, even on a machine where that
+// name doesn't currently resolve on PATH.
+var reservedCliCommands = map[string]bool{
+	"sudo": true, "su": true, "ssh": true, "scp": true, "sftp": true,
+	"bash": true, "sh": true, "zsh": true, "fish": true, "cmd": true, "powershell": true, "pwsh": true,
+	"top": true, "htop": true, "ls": true, "dir": true, "cat": true, "cp": true, "mv": true, "rm": true,
+	"dd": true, "mkfs": true, "fdisk": true, "diskpart": true, "format": true,
+	"systemctl": true, "service": true, "init": true, "reboot": true, "shutdown": true, "halt": true,
+	"login": true, "passwd": true, "chmod": true, "chown": true, "kill": true, "killall": true, "taskkill": true,
+	"curl": true, "wget": true, "nc": true, "ncat": true,
+	"python": true, "python3": true, "perl": true, "ruby": true, "node": true, "npm": true,
+	"git": true, "docker": true, "apt": true, "apt-get": true, "yum": true, "dnf": true, "pacman": true, "brew": true,
+	"explorer": true, "regedit": true, "net": true, "netsh": true, "reg": true,
+	"iptables": true, "firewall-cmd": true, "nmcli": true, "networksetup": true, "scutil": true, "hostnamectl": true,
+}
+
+func isReservedCliCommand(name string) bool {
+	return reservedCliCommands[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// cliShimMarker is embedded as a comment in every wrapper script / shim
+// this tool writes for Global CLI Integration, so a later enable/disable
+// can tell "a file we created" apart from "something that was already
+// there" before overwriting or deleting it.
+const cliShimMarker = "Switcher Suite Wizard Global CLI Shim"
+
+// fileHasCliShimMarker reports whether the file at path is one this tool
+// created (and is therefore safe to overwrite or remove). A missing or
+// unreadable file is treated as "not ours" (false), never as an error.
+func fileHasCliShimMarker(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	if len(data) > 4096 {
+		data = data[:4096]
+	}
+	return strings.Contains(string(data), cliShimMarker)
+}
+
+// legacyUnixShimTemplate and legacyWindowsShimTemplate are the exact
+// fmt.Sprintf templates this tool wrote for its Global CLI shims *before*
+// the shim-marker comment was introduced. "%s" marks where the executable
+// path was substituted in (one or more times); everything else is fixed,
+// literal template text. Kept here only so legacyShimPatterns can match
+// against them -- never used to write a new shim.
+const legacyUnixShimTemplate = "#!/bin/bash\nexec sudo \"%s\" \"$@\"\n"
+
+const legacyWindowsShimTemplate = `@echo off
+net session >nul 2>&1
+if %errorLevel% == 0 (
+    "%s" %*
+) else (
+    if "%~1"=="" (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%s' -Verb RunAs"
+    ) else (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%s' -ArgumentList '%*' -Verb RunAs"
+    )
+)
+`
+
+// legacyShimTemplateToPattern turns a legacy fmt.Sprintf template (one that
+// substitutes only "%s" -- always the executable path -- into otherwise
+// fixed text) into a regexp that matches any rendering of that template,
+// treating every "%s" position as a wildcard that can't itself contain a
+// quote or newline (an executable path never legitimately does).
+func legacyShimTemplateToPattern(template string) *regexp.Regexp {
+	parts := strings.Split(template, "%s")
+	escaped := make([]string, len(parts))
+	for i, p := range parts {
+		escaped[i] = regexp.QuoteMeta(p)
+	}
+	return regexp.MustCompile("^" + strings.Join(escaped, `[^'"\n]*`) + "$")
+}
+
+var legacyShimPatterns = []*regexp.Regexp{
+	legacyShimTemplateToPattern(legacyUnixShimTemplate),
+	legacyShimTemplateToPattern(legacyWindowsShimTemplate),
+}
+
+// isLegacyCliShimContent reports whether content is byte-for-byte what one
+// of this tool's pre-marker releases would have written for some
+// executable path. It deliberately does not try to recover or check that
+// path -- only that the surrounding, fixed template text matches exactly.
+func isLegacyCliShimContent(content string) bool {
+	for _, pattern := range legacyShimPatterns {
+		if pattern.MatchString(content) {
+			return true
+		}
+	}
+	return false
+}
+
+// isOwnedCliShimFile reports whether the file at path is one this tool
+// created -- either a current shim (carries cliShimMarker) or a shim from
+// before the marker existed (matches a legacy template exactly). A missing,
+// unreadable, or merely similar-looking foreign file is never "owned".
+func isOwnedCliShimFile(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	content := string(data)
+
+	markerScanWindow := content
+	if len(markerScanWindow) > 4096 {
+		markerScanWindow = markerScanWindow[:4096]
+	}
+	if strings.Contains(markerScanWindow, cliShimMarker) {
+		return true
+	}
+
+	return isLegacyCliShimContent(content)
+}
+
+// checkCliAliasSafeToClaim decides whether cmdName is safe for Global CLI
+// Integration to create or overwrite as a global alias. It rejects:
+//  1. anything on the reserved system-command list, regardless of whether
+//     it currently resolves on this machine;
+//  2. any name that already resolves via exec.LookPath to a file that
+//     isn't one this tool created (current or legacy shim);
+//  3. any of the concrete install-directory paths the caller is about to
+//     write to that already exist and aren't one this tool created.
+//
+// A name is only ever considered safe to claim if every check above either
+// finds nothing, or finds only files this tool created itself.
+func checkCliAliasSafeToClaim(cmdName string, candidatePaths []string) error {
+	cmdName = strings.TrimSpace(cmdName)
+
+	if isReservedCliCommand(cmdName) {
+		return fmt.Errorf("%q is a reserved system command name and cannot be used as a CLI alias", cmdName)
+	}
+
+	if resolved, err := exec.LookPath(cmdName); err == nil {
+		if !isOwnedCliShimFile(resolved) {
+			return fmt.Errorf("a command named %q already exists on PATH (%s) and was not created by Switcher Suite Wizard; choose a different alias", cmdName, resolved)
+		}
+	}
+
+	for _, p := range candidatePaths {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			return fmt.Errorf("%q already exists as a directory, not a file; choose a different alias", p)
+		}
+		if !isOwnedCliShimFile(p) {
+			return fmt.Errorf("%q already exists and was not created by Switcher Suite Wizard; choose a different alias or remove it manually first", p)
+		}
+	}
+
+	return nil
+}
+
 func getActiveCliCommand() string {
 	data, err := os.ReadFile(globalCliRecordFile)
 	if err != nil {
@@ -489,4 +645,49 @@ func probeProxyEndpoint(host, port string) (bool, string) {
 	_ = conn.Close()
 
 	return true, fmt.Sprintf("Socket probe SUCCESS: Active listener detected on %s.", target)
+}
+
+// windowsCliShimAllowedArg is the only argument the Windows Global CLI shim
+// ever forwards across the UAC elevation hop, mirroring allowedElevationArgs
+// in main.go. It's baked into the shim as a fixed literal rather than ever
+// being derived from whatever the caller typed (cmd.exe's "%*"), so the
+// PowerShell command string built below never contains unvalidated input.
+const windowsCliShimAllowedArg = "--cli-shell"
+
+// buildWindowsCliShim renders the .cmd/.bat shim Global CLI Integration
+// installs on Windows. It's kept OS-build-tag-free (pure string templating,
+// no Windows API calls) specifically so it can be unit tested on any
+// platform.
+//
+// The already-elevated branch ("%s" %*) forwards all arguments directly to
+// the trusted executable as plain argv -- cmd.exe doesn't reinterpret that
+// as a further command, so it isn't a shell-injection vector. The
+// not-yet-elevated branch used to splice the raw "%*" into a PowerShell
+// -ArgumentList string literal, which was: a value containing a single
+// quote could break out of it and run arbitrary PowerShell during the UAC
+// hop. Instead, the rendered batch script itself only ever compares the
+// first argument against windowsCliShimAllowedArg with a plain string
+// equality test, and uses that *fixed Go-string-literal* flag -- never the
+// compared value -- as the forwarded argument; any other input (no args,
+// extra args, or anything else) elevates with no arguments at all.
+func buildWindowsCliShim(execPath string) string {
+	quotedPath := powerShellSingleQuote(execPath)
+
+	return fmt.Sprintf(`@echo off
+REM %s
+net session >nul 2>&1
+if %%errorLevel%% == 0 (
+    "%s" %%*
+) else (
+    if "%%~1"=="%s" (
+        if "%%~2"=="" (
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath %s -ArgumentList '%s' -Verb RunAs"
+        ) else (
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath %s -Verb RunAs"
+        )
+    ) else (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath %s -Verb RunAs"
+    )
+)
+`, cliShimMarker, execPath, windowsCliShimAllowedArg, quotedPath, windowsCliShimAllowedArg, quotedPath, quotedPath)
 }

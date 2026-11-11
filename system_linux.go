@@ -776,12 +776,16 @@ func enableGlobalCLI(cmdName string) (string, error) {
 	}
 	execPath, _ = filepath.EvalSymlinks(execPath)
 
-	wrapperScript := fmt.Sprintf("#!/bin/bash\nexec sudo \"%s\" \"$@\"\n", execPath)
-
 	symlinkPaths := []string{
 		filepath.Join("/usr/local/bin", cmdName),
 		filepath.Join("/usr/bin", cmdName),
 	}
+
+	if err := checkCliAliasSafeToClaim(cmdName, symlinkPaths); err != nil {
+		return "", err
+	}
+
+	wrapperScript := fmt.Sprintf("#!/bin/bash\n# %s\nexec sudo \"%s\" \"$@\"\n", cliShimMarker, execPath)
 
 	wrapperCreated := false
 	for _, p := range symlinkPaths {
@@ -824,8 +828,14 @@ func disableGlobalCLI() (string, error) {
 		cmdName = "switcher-wizard"
 	}
 
-	_ = os.Remove(filepath.Join("/usr/local/bin", cmdName))
-	_ = os.Remove(filepath.Join("/usr/bin", cmdName))
+	for _, p := range []string{
+		filepath.Join("/usr/local/bin", cmdName),
+		filepath.Join("/usr/bin", cmdName),
+	} {
+		if isOwnedCliShimFile(p) {
+			_ = os.Remove(p)
+		}
+	}
 
 	homeDir, _ := os.UserHomeDir()
 	profiles := []string{

@@ -101,6 +101,34 @@ func restoreNormalScreen() {
 	fmt.Print("\033[?25h\033[?1049l")
 }
 
+// allowedElevationArgs whitelists the only command-line arguments this
+// program ever actually interprets (see the "--cli-shell" check in main()).
+// Anything else the process was invoked with is dropped before the Windows
+// elevation relaunch below, instead of being forwarded verbatim -- closing
+// the argument-injection path entirely rather than trying to escape
+// arbitrary, unvalidated input.
+var allowedElevationArgs = map[string]bool{
+	"--cli-shell": true,
+}
+
+func filterElevationArgs(args []string) []string {
+	safe := make([]string, 0, len(args))
+	for _, a := range args {
+		if allowedElevationArgs[a] {
+			safe = append(safe, a)
+		}
+	}
+	return safe
+}
+
+// powerShellSingleQuote wraps a value in single quotes for interpolation
+// into a PowerShell command string, doubling any embedded single quote --
+// PowerShell's own escape for a literal ' inside a '...' literal -- so the
+// value can never break out of the quoted literal.
+func powerShellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
 func autoElevateIfUnprivileged() {
 	if isElevated() {
 		return
@@ -112,12 +140,18 @@ func autoElevateIfUnprivileged() {
 	}
 
 	if runtime.GOOS == "windows" {
+		safeArgs := filterElevationArgs(os.Args[1:])
+
 		var psArgs string
-		args := strings.Join(os.Args[1:], " ")
-		if strings.TrimSpace(args) != "" {
-			psArgs = fmt.Sprintf(`Start-Process -FilePath '%s' -ArgumentList '%s' -Verb RunAs`, execPath, args)
+		if len(safeArgs) > 0 {
+			quoted := make([]string, len(safeArgs))
+			for i, a := range safeArgs {
+				quoted[i] = powerShellSingleQuote(a)
+			}
+			psArgs = fmt.Sprintf(`Start-Process -FilePath %s -ArgumentList @(%s) -Verb RunAs`,
+				powerShellSingleQuote(execPath), strings.Join(quoted, ","))
 		} else {
-			psArgs = fmt.Sprintf(`Start-Process -FilePath '%s' -Verb RunAs`, execPath)
+			psArgs = fmt.Sprintf(`Start-Process -FilePath %s -Verb RunAs`, powerShellSingleQuote(execPath))
 		}
 
 		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", psArgs)
