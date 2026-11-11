@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func execCommand(name string, args ...string) *exec.Cmd {
@@ -549,23 +550,45 @@ func detectDisplayManager() string {
 // being torn down by the switch itself (e.g. stopping the display manager
 // that owns the invoking session's cgroup). It prefers a transient systemd
 // scope, falling back to setsid, and finally to a plain background process.
+// launchDetached starts name/args as its own session (SysProcAttr.Setsid),
+// with stdio pointed at /dev/null so it has no controlling terminal to lose,
+// and releases Go's handle on the process so it survives independently of
+// this process -- including a SIGHUP when the invoking terminal closes.
+func launchDetached(devNull *os.File, name string, args ...string) bool {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	_ = cmd.Process.Release()
+	return true
+}
+
 func runDetachedModeSwitch(script string) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		devNull = nil
+	} else {
+		defer devNull.Close()
+	}
+
 	if commandExists("systemd-run") {
-		cmd := exec.Command("systemd-run", "--scope", "--collect", "--quiet", "bash", "-c", script)
-		if err := cmd.Start(); err == nil {
+		if launchDetached(devNull, "systemd-run", "--scope", "setsid", "bash", "-c", script) {
 			return
 		}
 	}
 
 	if commandExists("setsid") {
-		cmd := exec.Command("setsid", "bash", "-c", script)
-		if err := cmd.Start(); err == nil {
+		if launchDetached(devNull, "setsid", "bash", "-c", script) {
 			return
 		}
 	}
 
-	cmd := exec.Command("bash", "-c", script)
-	_ = cmd.Start()
+	launchDetached(devNull, "bash", "-c", script)
 }
 
 func buildGuiSwitchScript(dm string) string {
