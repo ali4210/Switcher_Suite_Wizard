@@ -18,14 +18,22 @@ MODE="${1:-normal}"
 
 # ------------------------------------------------------------------------------
 # Terminal Colors
+#
+# ANSI-C quoting ($'...') makes bash itself turn \033 into a real ESC byte
+# at assignment time. Plain single/double quotes leave it as the literal
+# four characters \, 0, 3, 3 -- which renders fine when the variable sits
+# inside a printf FORMAT string (printf's own backslash processing saves
+# it) but prints as literal text "\033[...m" when passed as a %s argument
+# instead (print_line() below does exactly that), since %s never
+# interprets escapes. ANSI-C quoting makes it correct either way.
 # ------------------------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC='\033[0m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m'
 
 # ------------------------------------------------------------------------------
 # Alternate-Screen Handling
