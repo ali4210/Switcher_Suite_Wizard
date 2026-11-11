@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -93,12 +95,28 @@ const (
 // Locked to compact width
 const FixedBoxWidth = 88
 
+// altScreenManaged is set when the process was launched with
+// --alt-screen-managed (passed as an argv token, not an env var, so it
+// survives a sudo re-exec): the parent (autorun.sh) has already put the
+// terminal into the alternate screen and owns leaving it, so this process
+// must not enter/leave it too -- mode 1049 does not nest. Cursor visibility
+// and color/attribute resets still happen on every exit path regardless.
+var altScreenManaged bool
+
 func initAlternateScreen() {
+	if altScreenManaged {
+		fmt.Print("\033[2J\033[H\033[?25l")
+		return
+	}
 	fmt.Print("\033[?1049h\033[2J\033[H\033[?25l")
 }
 
 func restoreNormalScreen() {
-	fmt.Print("\033[?25h\033[?1049l")
+	if altScreenManaged {
+		fmt.Print(Reset + "\033[?25h")
+		return
+	}
+	fmt.Print(Reset + "\033[?25h\033[?1049l")
 }
 
 // allowedElevationArgs whitelists the only command-line arguments this
@@ -165,20 +183,30 @@ func autoElevateIfUnprivileged() {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
-		if err := cmd.Run(); err == nil {
+		err := cmd.Run()
+		if err == nil {
 			os.Exit(0)
+		}
+		// Propagate the elevated child's real exit code when it actually ran
+		// and exited non-zero for its own reasons, rather than collapsing
+		// that case to the same exit(1) used when sudo itself failed to
+		// start (e.g. not installed, or the user declined the prompt).
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
 		}
 		os.Exit(1)
 	}
 }
 
+// getTerminalWidth is locked to the fixed FixedBoxWidth (88) layout: the
+// box-drawing UI assumes a constant width, so the real terminal size is
+// only used to detect an unreadable/unavailable terminal (err, or width
+// <= 0), never to resize the layout to it.
 func getTerminalWidth() int {
 	fd := int(os.Stdout.Fd())
 	width, _, err := term.GetSize(fd)
 	if err != nil || width <= 0 {
-		return FixedBoxWidth
-	}
-	if width < FixedBoxWidth {
 		return FixedBoxWidth
 	}
 	return FixedBoxWidth
@@ -383,6 +411,53 @@ func showHeader(title string) {
 	printHeaderSection(title, "\n")
 }
 
+// mainMenuItem and mainMenuItems are the single source of truth for the
+// main menu's contents: printMainMenu renders them, selectMainMenu derives
+// its wraparound bounds and EOF/quit sentinel from len(mainMenuItems()),
+// and selectMainMenuFallback's numbered choices are kept in step with it
+// by hand (its header text is custom per-category, not auto-generated).
+type mainMenuItem struct {
+	category string
+	title    string
+	desc     string
+}
+
+func mainMenuItems() []mainMenuItem {
+	return []mainMenuItem{
+		{"SYSTEM MANAGEMENT", "System Mode Switcher", "Switch between Graphical Desktop GUI and TTY / CLI terminal mode"},
+		{"SYSTEM MANAGEMENT", "System Hostname Manager", "Change system computer name in real-time or restore previous name"},
+		{"NETWORK TOOLS", "IP Address Manager", "Inspect all adapter IPs, configure static IPs, and manage aliases"},
+		{"NETWORK TOOLS", "DNS Resolver Switcher", "Apply Public DNS profiles, ping test resolvers, or restore DHCP"},
+		{"NETWORK TOOLS", "Proxy Configuration", "Enable, configure, or disable operating-system proxy endpoints"},
+		{"NETWORK TOOLS", "Restart Network Service", "Force restart NetworkManager daemon or refresh network bindings"},
+		{"NETWORK TOOLS", "Automated Network Troubleshooter", "Run real-time diagnostics, fix missing gateways, and restore connectivity"},
+		{"GLOBAL INTEGRATION", "Global CLI Integration", "Access Switcher Suite globally using 'switcher-wizard' with auto-root"},
+		{"REMOTE ACCESS", "SSH Server (Install / Enable)", "Install, enable, or disable the OpenSSH server, and manage its firewall rule"},
+		{"CONTROL", "Exit Switcher Suite", "Terminate current session and return safely to shell"},
+	}
+}
+
+// menuMoveUp / menuMoveDown implement the up/down arrow wraparound shared
+// by the main menu and SelectFromOptions, taking the real item count as a
+// parameter instead of a hardcoded number -- so adding or removing a menu
+// entry can never desync the wraparound logic from the actual list.
+func menuMoveUp(selected, count int) int {
+	if count <= 0 {
+		return 0
+	}
+	if selected <= 0 {
+		return count - 1
+	}
+	return selected - 1
+}
+
+func menuMoveDown(selected, count int) int {
+	if count <= 0 {
+		return 0
+	}
+	return (selected + 1) % count
+}
+
 func printMainMenu(selected int, newline string) {
 	var buf strings.Builder
 	buf.WriteString("\033[H\033[2J")
@@ -502,21 +577,7 @@ func printMainMenu(selected int, newline string) {
 	buf.WriteString(BorderColor + "║" + Reset + padDisplayWidth(modHeader, w-2) + BorderColor + "║" + Reset + "\033[K" + newline)
 	buf.WriteString(BorderColor + "╠" + strings.Repeat("═", w-2) + "╣" + Reset + "\033[K" + newline)
 
-	menuItems := []struct {
-		category string
-		title    string
-		desc     string
-	}{
-		{"SYSTEM MANAGEMENT", "System Mode Switcher", "Switch between Graphical Desktop GUI and TTY / CLI terminal mode"},
-		{"SYSTEM MANAGEMENT", "System Hostname Manager", "Change system computer name in real-time or restore previous name"},
-		{"NETWORK TOOLS", "IP Address Manager", "Inspect all adapter IPs, configure static IPs, and manage aliases"},
-		{"NETWORK TOOLS", "DNS Resolver Switcher", "Apply Public DNS profiles, ping test resolvers, or restore DHCP"},
-		{"NETWORK TOOLS", "Proxy Configuration", "Enable, configure, or disable operating-system proxy endpoints"},
-		{"NETWORK TOOLS", "Restart Network Service", "Force restart NetworkManager daemon or refresh network bindings"},
-		{"NETWORK TOOLS", "Automated Network Troubleshooter", "Run real-time diagnostics, fix missing gateways, and restore connectivity"},
-		{"GLOBAL INTEGRATION", "Global CLI Integration", "Access Switcher Suite globally using 'switcher-wizard' with auto-root"},
-		{"CONTROL", "Exit Switcher Suite", "Terminate current session and return safely to shell"},
-	}
+	menuItems := mainMenuItems()
 
 	lastCategory := ""
 
@@ -613,6 +674,9 @@ func selectMainMenu() int {
 	}
 	defer exitRawMode(fd, oldState)
 
+	itemCount := len(mainMenuItems())
+	exitIndex := itemCount - 1
+
 	selected := 0
 	reader := bufio.NewReader(os.Stdin)
 
@@ -621,14 +685,17 @@ func selectMainMenu() int {
 
 		key, err := reader.ReadByte()
 		if err != nil {
-			continue
+			// stdin closed (EOF, no controlling TTY, etc.) -- treat as quit
+			// instead of busy-looping forever on a ReadByte that will keep
+			// returning the same error.
+			return exitIndex
 		}
 
 		switch key {
 		case '\r', '\n':
 			return selected
-		case 'q', 'Q':
-			return 8
+		case 'q', 'Q', 3:
+			return exitIndex
 		case 27:
 			next1, err1 := reader.ReadByte()
 			next2, err2 := reader.ReadByte()
@@ -637,13 +704,9 @@ func selectMainMenu() int {
 			}
 			switch next2 {
 			case 'A':
-				if selected == 0 {
-					selected = 8
-				} else {
-					selected--
-				}
+				selected = menuMoveUp(selected, itemCount)
 			case 'B':
-				selected = (selected + 1) % 9
+				selected = menuMoveDown(selected, itemCount)
 			}
 		}
 	}
@@ -705,13 +768,16 @@ func SelectFromOptions(title, prompt string, options []string) int {
 
 		key, err := reader.ReadByte()
 		if err != nil {
-			continue
+			// stdin closed (EOF, no controlling TTY, etc.) -- treat as
+			// cancel instead of busy-looping forever on a ReadByte that
+			// will keep returning the same error.
+			return -1
 		}
 
 		switch key {
 		case '\r', '\n':
 			return selected
-		case 'q', 'Q':
+		case 'q', 'Q', 3:
 			return -1
 		case 27:
 			next1, err1 := reader.ReadByte()
@@ -721,13 +787,9 @@ func SelectFromOptions(title, prompt string, options []string) int {
 			}
 			switch next2 {
 			case 'A':
-				if selected == 0 {
-					selected = len(options) - 1
-				} else {
-					selected--
-				}
+				selected = menuMoveUp(selected, len(options))
 			case 'B':
-				selected = (selected + 1) % len(options)
+				selected = menuMoveDown(selected, len(options))
 			}
 		}
 	}
@@ -748,6 +810,9 @@ func selectMainMenuFallback() int {
 	printBoxBlankRow("\n")
 	printBoxRow(" "+FgIndigo+Bold+"── GLOBAL INTEGRATION "+BorderColor+"──────────────────────"+Reset, "\n")
 	printBoxRow("  [8] Global CLI Integration", "\n")
+	printBoxBlankRow("\n")
+	printBoxRow(" "+FgIndigo+Bold+"── REMOTE ACCESS "+BorderColor+"─────────────────────────────"+Reset, "\n")
+	printBoxRow("  [9] SSH Server (Install / Enable)", "\n")
 	printBoxBlankRow("\n")
 	printBoxRow("  [0] Exit Wizard", "\n")
 	printBoxSeparator("\n")
@@ -770,8 +835,10 @@ func selectMainMenuFallback() int {
 		return 6
 	case "8":
 		return 7
-	default:
+	case "9":
 		return 8
+	default:
+		return len(mainMenuItems()) - 1
 	}
 }
 
@@ -1540,7 +1607,7 @@ func testCurrentProxyFlow(activeProxy string) {
 		return
 	}
 
-	printBoxRow(" "+FgCyan+"[i] Probing active proxy endpoint "+FgBright+Bold+host+":"+port+Reset+" ...", "\n")
+	printBoxRow(" "+FgCyan+"[i] Probing active proxy endpoint "+FgBright+Bold+net.JoinHostPort(host, port)+Reset+" ...", "\n")
 	printBoxBlankRow("\n")
 
 	isAlive, details := probeProxyEndpoint(host, port)
@@ -1709,6 +1776,13 @@ func main() {
 	}
 	autoElevateIfUnprivileged()
 
+	for _, a := range os.Args[1:] {
+		if a == "--alt-screen-managed" {
+			altScreenManaged = true
+			break
+		}
+	}
+
 	// Direct OS-Agnostic Boot CLI-Shell Router
 	if len(os.Args) > 1 && os.Args[1] == "--cli-shell" {
 		handleDirectBootCliShell()
@@ -1718,7 +1792,7 @@ func main() {
 	defer restoreNormalScreen()
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		<-sigChan
 		restoreRawModeIfActive()
@@ -1745,6 +1819,8 @@ func main() {
 			networkTroubleshooterFlow()
 		case 7:
 			globalCliMenu()
+		case 8:
+			sshServerMenu()
 		default:
 			restoreNormalScreen()
 			os.Exit(0)

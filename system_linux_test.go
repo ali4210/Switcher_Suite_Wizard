@@ -2,9 +2,12 @@
 
 package main
 
-import "strings"
-
-import "testing"
+import (
+	"errors"
+	"net"
+	"strings"
+	"testing"
+)
 
 // buildGuiSwitchScript / buildTtySwitchScript are pure string builders (no
 // filesystem or command execution), so they're safe to exercise directly
@@ -93,6 +96,447 @@ func TestBuildTtySwitchScript(t *testing.T) {
 		}
 	}
 }
+
+// buildLinuxProxyEnvContent is a pure string builder (no filesystem or
+// command execution), exercised directly for IPv4, hostname, and IPv6
+// endpoints -- plus a full parseAndValidateProxy -> net.JoinHostPort ->
+// buildLinuxProxyEnvContent pipeline test confirming an injection attempt
+// never reaches the builder at all, because parseAndValidateProxy rejects
+// it first.
+
+func TestBuildLinuxProxyEnvContent(t *testing.T) {
+	cases := []struct {
+		name     string
+		endpoint string
+		wantSubs []string
+	}{
+		{
+			name:     "IPv4",
+			endpoint: "127.0.0.1:8080",
+			wantSubs: []string{
+				`http_proxy="http://127.0.0.1:8080/"`,
+				`https_proxy="http://127.0.0.1:8080/"`,
+				`all_proxy="socks5://127.0.0.1:8080/"`,
+				`HTTP_PROXY="http://127.0.0.1:8080/"`,
+				`HTTPS_PROXY="http://127.0.0.1:8080/"`,
+				`ALL_PROXY="socks5://127.0.0.1:8080/"`,
+			},
+		},
+		{
+			name:     "hostname",
+			endpoint: "proxy.company.com:3128",
+			wantSubs: []string{
+				`http_proxy="http://proxy.company.com:3128/"`,
+				`all_proxy="socks5://proxy.company.com:3128/"`,
+			},
+		},
+		{
+			name:     "IPv6",
+			endpoint: "[::1]:8080",
+			wantSubs: []string{
+				`http_proxy="http://[::1]:8080/"`,
+				`https_proxy="http://[::1]:8080/"`,
+				`all_proxy="socks5://[::1]:8080/"`,
+				`HTTP_PROXY="http://[::1]:8080/"`,
+				`HTTPS_PROXY="http://[::1]:8080/"`,
+				`ALL_PROXY="socks5://[::1]:8080/"`,
+			},
+		},
+	}
+
+	for _, c := range cases {
+		content := buildLinuxProxyEnvContent(c.endpoint)
+		for _, want := range c.wantSubs {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s: buildLinuxProxyEnvContent(%q) missing %q in:\n%s", c.name, c.endpoint, want, content)
+			}
+		}
+		if !strings.Contains(content, `no_proxy="localhost,127.0.0.1,localaddress,.localdomain.com"`) {
+			t.Errorf("%s: buildLinuxProxyEnvContent(%q) missing no_proxy line", c.name, c.endpoint)
+		}
+	}
+}
+
+// TestSetSystemProxyPipeline_Linux exercises the same host->endpoint->env
+// pipeline setSystemProxy runs, end to end, for every raw input a user
+// could type -- IPv4, hostname, and bracketed IPv6 -- confirming the
+// endpoint reaching buildLinuxProxyEnvContent is always the correct
+// net.JoinHostPort form, and that injection attempts are rejected by
+// parseAndValidateProxy before an endpoint is ever built at all.
+func TestSetSystemProxyPipeline_Linux(t *testing.T) {
+	valid := []struct {
+		input, wantEndpoint string
+	}{
+		{"127.0.0.1:8080", "127.0.0.1:8080"},
+		{"proxy.company.com:3128", "proxy.company.com:3128"},
+		{"[::1]:8080", "[::1]:8080"},
+		{"[2001:db8::1]:3128", "[2001:db8::1]:3128"},
+	}
+	for _, c := range valid {
+		host, port, err := parseAndValidateProxy(c.input)
+		if err != nil {
+			t.Errorf("parseAndValidateProxy(%q) unexpected error: %v", c.input, err)
+			continue
+		}
+		endpoint := net.JoinHostPort(host, port)
+		if endpoint != c.wantEndpoint {
+			t.Errorf("pipeline(%q) endpoint = %q, want %q", c.input, endpoint, c.wantEndpoint)
+			continue
+		}
+		content := buildLinuxProxyEnvContent(endpoint)
+		if !strings.Contains(content, `http_proxy="http://`+endpoint+`/"`) {
+			t.Errorf("pipeline(%q) env content missing endpoint %q:\n%s", c.input, endpoint, content)
+		}
+	}
+
+	injection := []string{
+		"[::1; rm -rf /]:8080",
+		"[$(id)::1]:8080",
+		"[`id`::1]:8080",
+		"a;id:8080",
+		"$(id):8080",
+	}
+	for _, in := range injection {
+		if _, _, err := parseAndValidateProxy(in); err == nil {
+			t.Errorf("parseAndValidateProxy(%q) expected error (so it never reaches buildLinuxProxyEnvContent), got nil", in)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SSH Server -- Linux pure helpers: package-manager detection, service-name
+// selection, status-output parsing, and command argv builders. Each one
+// below takes real-world-shaped sample output as a literal string, or a
+// fake lookup/listUnitFiles closure in place of commandExists/runCommand,
+// so nothing here executes a real command or touches real system state.
+// ---------------------------------------------------------------------------
+
+func TestDetectLinuxPackageManager(t *testing.T) {
+	fakeExists := func(present ...string) func(string) bool {
+		set := map[string]bool{}
+		for _, p := range present {
+			set[p] = true
+		}
+		return func(name string) bool { return set[name] }
+	}
+
+	cases := []struct {
+		name    string
+		present []string
+		want    string
+	}{
+		{"apt available (Debian/Ubuntu/Kali)", []string{"apt", "dpkg"}, "apt"},
+		{"dnf available (Fedora)", []string{"dnf", "rpm"}, "dnf"},
+		{"yum available (older RHEL/CentOS)", []string{"yum"}, "yum"},
+		{"pacman available (Arch)", []string{"pacman"}, "pacman"},
+		{"zypper available (openSUSE)", []string{"zypper"}, "zypper"},
+		{"apk available (Alpine)", []string{"apk"}, "apk"},
+		{"apt preferred over others when multiple present", []string{"yum", "apt", "pacman"}, "apt"},
+		{"none present", []string{}, ""},
+	}
+	for _, c := range cases {
+		if got := detectLinuxPackageManager(fakeExists(c.present...)); got != c.want {
+			t.Errorf("%s: detectLinuxPackageManager(...) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBuildSSHInstallArgs(t *testing.T) {
+	cases := []struct {
+		pm   string
+		want []string
+	}{
+		{"apt", []string{"apt-get", "install", "-y", "openssh-server"}},
+		{"dnf", []string{"dnf", "install", "-y", "openssh-server"}},
+		{"yum", []string{"yum", "install", "-y", "openssh-server"}},
+		{"pacman", []string{"pacman", "-S", "--noconfirm", "--needed", "openssh"}},
+		{"zypper", []string{"zypper", "--non-interactive", "install", "openssh"}},
+		{"apk", []string{"apk", "add", "openssh"}},
+		{"unknown-pm", nil},
+	}
+	for _, c := range cases {
+		got := buildSSHInstallArgs(c.pm)
+		if len(got) != len(c.want) {
+			t.Fatalf("buildSSHInstallArgs(%q) = %v, want %v", c.pm, got, c.want)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("buildSSHInstallArgs(%q)[%d] = %q, want %q", c.pm, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+func TestPickLinuxSSHServiceName(t *testing.T) {
+	fakeListUnitFiles := func(installed ...string) func(string) (string, error) {
+		set := map[string]bool{}
+		for _, u := range installed {
+			set[u] = true
+		}
+		return func(unit string) (string, error) {
+			if set[unit] {
+				// Real `systemctl list-unit-files <unit>` prints a
+				// header + a row containing the unit name when found.
+				return "UNIT FILE STATE\n" + unit + " enabled\n\n1 unit files listed.\n", nil
+			}
+			// Real systemctl exits non-zero with "0 unit files listed."
+			// when the unit doesn't exist.
+			return "0 unit files listed.\n", errors.New("exit status 1")
+		}
+	}
+
+	cases := []struct {
+		name      string
+		installed []string
+		want      string
+	}{
+		{"Debian/Ubuntu/Kali: ssh.service", []string{"ssh.service"}, "ssh.service"},
+		{"RHEL/Fedora/Arch/openSUSE: sshd.service", []string{"sshd.service"}, "sshd.service"},
+		{"ssh.service preferred when both installed", []string{"ssh.service", "sshd.service"}, "ssh.service"},
+		{"neither installed", []string{}, ""},
+	}
+	for _, c := range cases {
+		if got := pickLinuxSSHServiceName(fakeListUnitFiles(c.installed...)); got != c.want {
+			t.Errorf("%s: pickLinuxSSHServiceName(...) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestParseSystemctlIsActiveOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"active\n", true},
+		{"inactive\n", false},
+		{"failed\n", false},
+		{"activating\n", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseSystemctlIsActiveOutput(c.output); got != c.want {
+			t.Errorf("parseSystemctlIsActiveOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestParseSystemctlIsEnabledOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"enabled\n", true},
+		{"disabled\n", false},
+		{"static\n", false},
+		{"masked\n", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseSystemctlIsEnabledOutput(c.output); got != c.want {
+			t.Errorf("parseSystemctlIsEnabledOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestParseSSHDConfigPorts(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   []int
+	}{
+		{
+			name:   "default single port",
+			output: "port 22\naddressfamily any\nlistenaddress 0.0.0.0:22\nlistenaddress [::]:22\n",
+			want:   []int{22},
+		},
+		{
+			name:   "custom non-standard port",
+			output: "port 2222\naddressfamily any\n",
+			want:   []int{2222},
+		},
+		{
+			name:   "multiple port directives",
+			output: "port 22\nport 2222\n",
+			want:   []int{22, 2222},
+		},
+		{
+			name:   "no port line",
+			output: "addressfamily any\n",
+			want:   nil,
+		},
+	}
+	for _, c := range cases {
+		got := parseSSHDConfigPorts(c.output)
+		if len(got) != len(c.want) {
+			t.Fatalf("%s: parseSSHDConfigPorts(...) = %v, want %v", c.name, got, c.want)
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: parseSSHDConfigPorts(...)[%d] = %d, want %d", c.name, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+func TestParseListeningPorts(t *testing.T) {
+	// Real `ss -H -ltn` output: State Recv-Q Send-Q LocalAddr:Port PeerAddr:Port
+	output := "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n" +
+		"LISTEN 0 128 [::]:22 [::]:*\n" +
+		"LISTEN 0 4096 127.0.0.1:631 0.0.0.0:*\n"
+
+	got := parseListeningPorts(output)
+
+	for _, port := range []int{22, 631} {
+		if !got[port] {
+			t.Errorf("parseListeningPorts(...) missing port %d, got %v", port, got)
+		}
+	}
+	if got[2222] {
+		t.Errorf("parseListeningPorts(...) unexpectedly reports port 2222 listening")
+	}
+}
+
+func TestDetectLinuxFirewallTool(t *testing.T) {
+	fakeExists := func(present ...string) func(string) bool {
+		set := map[string]bool{}
+		for _, p := range present {
+			set[p] = true
+		}
+		return func(name string) bool { return set[name] }
+	}
+
+	cases := []struct {
+		name    string
+		present []string
+		want    string
+	}{
+		{"ufw present (Debian/Ubuntu/Kali default)", []string{"ufw"}, "ufw"},
+		{"firewalld present (RHEL/Fedora default)", []string{"firewall-cmd"}, "firewalld"},
+		{"ufw preferred when both present", []string{"ufw", "firewall-cmd"}, "ufw"},
+		{"neither present", []string{}, ""},
+	}
+	for _, c := range cases {
+		if got := detectLinuxFirewallTool(fakeExists(c.present...)); got != c.want {
+			t.Errorf("%s: detectLinuxFirewallTool(...) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestParseUfwStatusOutput(t *testing.T) {
+	cases := []struct {
+		name          string
+		output        string
+		wantActive    bool
+		wantAllowsSSH bool
+	}{
+		{
+			name:          "inactive",
+			output:        "Status: inactive\n",
+			wantActive:    false,
+			wantAllowsSSH: false,
+		},
+		{
+			name: "active, OpenSSH already allowed",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"OpenSSH                    ALLOW       Anywhere\n",
+			wantActive:    true,
+			wantAllowsSSH: true,
+		},
+		{
+			name: "active, literal 22/tcp rule",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"22/tcp                     ALLOW       Anywhere\n",
+			wantActive:    true,
+			wantAllowsSSH: true,
+		},
+		{
+			name: "active, SSH not allowed",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"80/tcp                     ALLOW       Anywhere\n",
+			wantActive:    true,
+			wantAllowsSSH: false,
+		},
+	}
+	for _, c := range cases {
+		active, allowsSSH := parseUfwStatusOutput(c.output)
+		if active != c.wantActive || allowsSSH != c.wantAllowsSSH {
+			t.Errorf("%s: parseUfwStatusOutput(...) = (active=%v, allowsSSH=%v), want (%v, %v)",
+				c.name, active, allowsSSH, c.wantActive, c.wantAllowsSSH)
+		}
+	}
+}
+
+func TestParseFirewalldStateOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"running\n", true},
+		{"not running\n", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseFirewalldStateOutput(c.output); got != c.want {
+			t.Errorf("parseFirewalldStateOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestParseFirewalldServicesOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"dhcpv6-client ssh\n", true},
+		{"dhcpv6-client\n", false},
+		{"ssh\n", true},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseFirewalldServicesOutput(c.output); got != c.want {
+			t.Errorf("parseFirewalldServicesOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestBuildFirewallAllowCommands(t *testing.T) {
+	ufw := buildFirewallAllowCommands("ufw")
+	if len(ufw) != 1 || strings.Join(ufw[0], " ") != "ufw allow OpenSSH" {
+		t.Errorf("buildFirewallAllowCommands(ufw) = %v, want [[ufw allow OpenSSH]]", ufw)
+	}
+
+	firewalld := buildFirewallAllowCommands("firewalld")
+	if len(firewalld) != 2 {
+		t.Fatalf("buildFirewallAllowCommands(firewalld) = %v, want 2 commands (add-service + reload)", firewalld)
+	}
+	if strings.Join(firewalld[0], " ") != "firewall-cmd --permanent --add-service=ssh" {
+		t.Errorf("buildFirewallAllowCommands(firewalld)[0] = %v", firewalld[0])
+	}
+	if strings.Join(firewalld[1], " ") != "firewall-cmd --reload" {
+		t.Errorf("buildFirewallAllowCommands(firewalld)[1] = %v", firewalld[1])
+	}
+
+	if got := buildFirewallAllowCommands("unknown"); got != nil {
+		t.Errorf("buildFirewallAllowCommands(unknown) = %v, want nil", got)
+	}
+}
+
+// getSSHServerStatus / enableSSHServer / disableSSHServer /
+// ensureFirewallAllowsSSH themselves call runCommand/commandExists
+// directly (systemctl, sshd, ssh-keygen, ss, ufw/firewall-cmd, and real
+// package managers) with no injectable seam, matching this file's
+// existing testability convention for launchDetached /
+// runDetachedModeSwitch / detectDisplayManager / syncLinuxHostsFile /
+// isSystemdResolvedManaged below. Per the project's safety rules, none of
+// those five are exercised here or anywhere in this test suite -- only
+// the pure parsing/building/selection logic above is, which is exactly
+// what those five delegate every real decision to.
 
 // launchDetached / runDetachedModeSwitch / detectDisplayManager /
 // syncLinuxHostsFile / isSystemdResolvedManaged all either hardcode real

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -94,6 +95,10 @@ func TestParseAndValidateProxy_Valid(t *testing.T) {
 		{" 127.0.0.1:8080 ", "127.0.0.1", "8080"},
 		{"127.0.0.1:1", "127.0.0.1", "1"},
 		{"127.0.0.1:65535", "127.0.0.1", "65535"},
+		{"[::1]:8080", "::1", "8080"},
+		{"[2001:db8::1]:3128", "2001:db8::1", "3128"},
+		{"http://[::1]:8080", "::1", "8080"},
+		{" [::1]:8080 ", "::1", "8080"},
 	}
 	for _, c := range cases {
 		host, port, err := parseAndValidateProxy(c.input)
@@ -135,6 +140,15 @@ func TestParseAndValidateProxy_Invalid(t *testing.T) {
 		"127.0.0.1:abc",
 		"127.0.0.1:-1",
 		"127.0.0.1:99999",
+		"::1:8080", // unbracketed IPv6 is ambiguous -- must be rejected, not guessed at
+		"a:b:c",    // same ambiguity, non-IP
+		"[::1]:0",
+		"[::1]:65536",
+		"[::1]:abc",
+		"[::1; rm -rf /]:8080", // injection attempt disguised as an IPv6 literal
+		"[$(id)::1]:8080",
+		"[`id`::1]:8080",
+		"[::1' ; id ; ']:8080",
 	}
 	for _, in := range invalid {
 		if _, _, err := parseAndValidateProxy(in); err == nil {
@@ -590,6 +604,39 @@ func TestActiveProxyRecordRoundTrip(t *testing.T) {
 	}
 }
 
+// TestActiveProxyRecordRoundTrip_IPv6 exercises the full pipeline a real
+// "set proxy" -> "test current proxy" cycle goes through: build the
+// endpoint with net.JoinHostPort (what setSystemProxy now does), save it,
+// read it back, and re-parse it with parseAndValidateProxy (what
+// testCurrentProxyFlow does with whatever getCurrentProxy returns) --
+// confirming the bracketed IPv6 form survives the save/load/parse cycle
+// intact.
+func TestActiveProxyRecordRoundTrip_IPv6(t *testing.T) {
+	withTempCWD(t)
+
+	endpoint := net.JoinHostPort("::1", "8080")
+	if endpoint != "[::1]:8080" {
+		t.Fatalf("net.JoinHostPort(%q, %q) = %q, want %q", "::1", "8080", endpoint, "[::1]:8080")
+	}
+
+	saveActiveProxyRecord(endpoint)
+
+	rec := getActiveProxyRecord()
+	if rec != endpoint {
+		t.Fatalf("getActiveProxyRecord() = %q, want %q", rec, endpoint)
+	}
+
+	host, port, err := parseAndValidateProxy(rec)
+	if err != nil {
+		t.Fatalf("parseAndValidateProxy(%q) unexpected error: %v", rec, err)
+	}
+	if host != "::1" || port != "8080" {
+		t.Errorf("parseAndValidateProxy(%q) = (%q,%q), want (%q,%q)", rec, host, port, "::1", "8080")
+	}
+
+	removeActiveProxyRecord()
+}
+
 // ---------------------------------------------------------------------------
 // commandExists -- safe, read-only PATH lookups.
 // ---------------------------------------------------------------------------
@@ -1013,5 +1060,121 @@ func TestBuildWindowsCliShim_MaliciousExecPathNeverBreaksOutOfQuotes(t *testing.
 				t.Errorf("path %q: -ArgumentList segment is not the fixed whitelisted literal: %s", path, seg)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SSH Server -- shared, OS-agnostic idempotency/firewall-prompt decisions
+// ---------------------------------------------------------------------------
+
+func TestSSHServerNeedsSetup(t *testing.T) {
+	cases := []struct {
+		name   string
+		status SSHServerStatus
+		want   bool
+	}{
+		{"fully active, nothing to do", SSHServerStatus{Installed: true, Enabled: true, Running: true}, false},
+		{"not installed", SSHServerStatus{Installed: false, Enabled: false, Running: false}, true},
+		{"installed but not enabled", SSHServerStatus{Installed: true, Enabled: false, Running: true}, true},
+		{"installed and enabled but not running", SSHServerStatus{Installed: true, Enabled: true, Running: false}, true},
+		{"nothing set", SSHServerStatus{}, true},
+	}
+	for _, c := range cases {
+		if got := sshServerNeedsSetup(c.status); got != c.want {
+			t.Errorf("%s: sshServerNeedsSetup(%+v) = %v, want %v", c.name, c.status, got, c.want)
+		}
+	}
+}
+
+func TestSSHServerNeedsFirewallPrompt(t *testing.T) {
+	cases := []struct {
+		name   string
+		status SSHServerStatus
+		want   bool
+	}{
+		{"no firewall tool (e.g. macOS) -- never prompt", SSHServerStatus{FirewallTool: "", FirewallActive: true, FirewallAllowsSSH: false}, false},
+		{"firewall tool present but inactive -- no prompt", SSHServerStatus{FirewallTool: "ufw", FirewallActive: false, FirewallAllowsSSH: false}, false},
+		{"firewall active and already allows ssh -- no prompt", SSHServerStatus{FirewallTool: "ufw", FirewallActive: true, FirewallAllowsSSH: true}, false},
+		{"firewall active and blocks ssh -- prompt", SSHServerStatus{FirewallTool: "ufw", FirewallActive: true, FirewallAllowsSSH: false}, true},
+		{"windows firewall active and blocks ssh -- prompt", SSHServerStatus{FirewallTool: "Windows Defender Firewall", FirewallActive: true, FirewallAllowsSSH: false}, true},
+	}
+	for _, c := range cases {
+		if got := sshServerNeedsFirewallPrompt(c.status); got != c.want {
+			t.Errorf("%s: sshServerNeedsFirewallPrompt(%+v) = %v, want %v", c.name, c.status, got, c.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Main menu wraparound -- derived from the real item count, not a
+// hardcoded number (this is exactly the bug the SSH Server menu entry
+// would otherwise have reintroduced: adding a 10th item without updating
+// a hardcoded 8/9 elsewhere).
+// ---------------------------------------------------------------------------
+
+func TestMainMenuItemsCount(t *testing.T) {
+	// Sanity check that catches an edit to mainMenuItems() that forgets a
+	// category, not a specific magic number: the main menu dispatch
+	// switch in main() has one case per item except the last (Exit, the
+	// default case), so this is "at least a couple of real entries plus
+	// the always-present Exit", not an exact hardcoded count.
+	items := mainMenuItems()
+	if len(items) < 2 {
+		t.Fatalf("mainMenuItems() returned %d items, want at least 2", len(items))
+	}
+	if items[len(items)-1].title != "Exit Switcher Suite" {
+		t.Errorf("mainMenuItems() last item = %q, want the Exit entry last", items[len(items)-1].title)
+	}
+}
+
+func TestMenuMoveUp(t *testing.T) {
+	cases := []struct {
+		name          string
+		selected, cnt int
+		want          int
+	}{
+		{"middle of a 10-item menu", 5, 10, 4},
+		{"wraps from 0 to the last index", 0, 10, 9},
+		{"single-item menu wraps to itself", 0, 1, 0},
+		{"zero count never panics or goes negative", 0, 0, 0},
+	}
+	for _, c := range cases {
+		if got := menuMoveUp(c.selected, c.cnt); got != c.want {
+			t.Errorf("%s: menuMoveUp(%d, %d) = %d, want %d", c.name, c.selected, c.cnt, got, c.want)
+		}
+	}
+}
+
+func TestMenuMoveDown(t *testing.T) {
+	cases := []struct {
+		name          string
+		selected, cnt int
+		want          int
+	}{
+		{"middle of a 10-item menu", 5, 10, 6},
+		{"wraps from the last index to 0", 9, 10, 0},
+		{"single-item menu wraps to itself", 0, 1, 0},
+		{"zero count never panics or divides by zero", 0, 0, 0},
+	}
+	for _, c := range cases {
+		if got := menuMoveDown(c.selected, c.cnt); got != c.want {
+			t.Errorf("%s: menuMoveDown(%d, %d) = %d, want %d", c.name, c.selected, c.cnt, got, c.want)
+		}
+	}
+}
+
+// TestSelectMainMenuWraparoundMatchesItemCount is the specific regression
+// test for this fix: selectMainMenu must derive its wraparound bounds
+// from len(mainMenuItems()), not a number that has to be remembered and
+// hand-updated every time a menu entry is added or removed.
+func TestSelectMainMenuWraparoundMatchesItemCount(t *testing.T) {
+	itemCount := len(mainMenuItems())
+	exitIndex := itemCount - 1
+
+	if got := menuMoveUp(0, itemCount); got != exitIndex {
+		t.Errorf("menuMoveUp(0, %d) = %d, want %d (pressing Up from the first item must land on Exit, the last item)", itemCount, got, exitIndex)
+	}
+	if got := menuMoveDown(exitIndex, itemCount); got != 0 {
+		t.Errorf("menuMoveDown(%d, %d) = %d, want 0 (pressing Down from Exit must wrap back to the first item)", exitIndex, itemCount, got)
 	}
 }

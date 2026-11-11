@@ -18,14 +18,72 @@ MODE="${1:-normal}"
 
 # ------------------------------------------------------------------------------
 # Terminal Colors
+#
+# ANSI-C quoting ($'...') makes bash itself turn \033 into a real ESC byte
+# at assignment time. Plain single/double quotes leave it as the literal
+# four characters \, 0, 3, 3 -- which renders fine when the variable sits
+# inside a printf FORMAT string (printf's own backslash processing saves
+# it) but prints as literal text "\033[...m" when passed as a %s argument
+# instead (print_line() below does exactly that), since %s never
+# interprets escapes. ANSI-C quoting makes it correct either way.
 # ------------------------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC='\033[0m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m'
+
+# ------------------------------------------------------------------------------
+# Alternate-Screen Handling
+#
+# The wrapper's menu, build/test output, and the launched binary all run on
+# the terminal's alternate screen -- like vim/less -- so none of it disturbs
+# whatever was already on the user's screen or scrollback. On any exit the
+# original screen is restored exactly. Skipped entirely for --help and for
+# non-TTY/dumb-terminal invocations (piping, CI logs, etc.).
+# ------------------------------------------------------------------------------
+ALT_SCREEN_ACTIVE=0
+
+use_alt_screen() {
+    [[ -t 1 ]] && [[ "${TERM:-dumb}" != "dumb" ]]
+}
+
+enter_alt_screen() {
+    if use_alt_screen; then
+        printf '\033[?1049h\033[H\033[2J'
+        ALT_SCREEN_ACTIVE=1
+    fi
+}
+
+# Idempotent: safe to call more than once (e.g. once from the ERR trap and
+# again from the EXIT trap right after it).
+leave_alt_screen() {
+    if [[ "$ALT_SCREEN_ACTIVE" -eq 1 ]]; then
+        printf '\033[0m\033[?25h\033[?1049l'
+        ALT_SCREEN_ACTIVE=0
+    fi
+}
+
+on_exit() {
+    leave_alt_screen
+}
+
+# INT/TERM/HUP: leave the alt screen, then restore the signal's default
+# disposition and re-deliver it to ourselves, so the shell actually dies
+# with the conventional 128+n exit status instead of silently continuing.
+on_fatal_signal() {
+    local sig="$1"
+    leave_alt_screen
+    trap - "$sig"
+    kill -s "$sig" "$$"
+}
+
+trap on_exit EXIT
+trap 'on_fatal_signal INT'  INT
+trap 'on_fatal_signal TERM' TERM
+trap 'on_fatal_signal HUP'  HUP
 
 # ------------------------------------------------------------------------------
 # Display Helpers
@@ -56,6 +114,10 @@ step() {
 
 cleanup_on_error() {
     exit_code=$?
+    # Leave the alternate screen FIRST so the error below lands on the
+    # user's real, readable screen instead of a buffer that's about to be
+    # discarded.
+    leave_alt_screen
     printf "\n"
     error "Build process stopped with exit code ${exit_code}."
     warning "Fix the error shown above, then run the script again."
@@ -65,7 +127,10 @@ cleanup_on_error() {
 trap cleanup_on_error ERR
 
 cd "$PROJECT_DIR"
-clear
+
+if [[ "$MODE" != "-h" && "$MODE" != "--help" && "$MODE" != "help" ]]; then
+    enter_alt_screen
+fi
 
 # ------------------------------------------------------------------------------
 # Display Portrait Banner
@@ -345,13 +410,26 @@ success "Binary ready: $PROJECT_DIR/$BINARY_NAME"
 # ------------------------------------------------------------------------------
 HOST_UNAME="$(uname -s)"
 
+LAUNCH_ARGS=()
+# Expanded below as "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}", not a bare
+# "${LAUNCH_ARGS[@]}": under `set -u`, bash < 4.4 (this is bash 3.2 on
+# macOS) treats expanding an empty array as an unbound-variable error.
+# The ${arr[@]+...} form sidesteps that on every bash version this
+# script needs to run on.
+if [[ "$ALT_SCREEN_ACTIVE" -eq 1 ]]; then
+    # We already own the alternate screen; tell the binary not to also
+    # enter/leave it itself (mode 1049 does not nest). Passed as an argv
+    # token, not an env var, so it survives the sudo re-exec below.
+    LAUNCH_ARGS+=("--alt-screen-managed")
+fi
+
 if [[ "$TARGET_OS" == "linux" && "$HOST_UNAME" == "Linux" ]]; then
     step "LAUNCHING SWITCHER SUITE"
     printf '%sExecuting with Root Privileges...%s\n\n' "$DIM" "$NC"
     if [[ "$(id -u)" -eq 0 ]]; then
-        "./$BINARY_NAME"
+        "./$BINARY_NAME" "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}"
     else
-        sudo "./$BINARY_NAME"
+        sudo "./$BINARY_NAME" "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}"
     fi
     printf "\n"
     success "Switcher Suite closed. Returned safely to your terminal."
@@ -359,9 +437,9 @@ elif [[ "$TARGET_OS" == "darwin" && "$HOST_UNAME" == "Darwin" ]]; then
     step "LAUNCHING SWITCHER SUITE"
     printf '%sExecuting with Root Privileges...%s\n\n' "$DIM" "$NC"
     if [[ "$(id -u)" -eq 0 ]]; then
-        "./$BINARY_NAME"
+        "./$BINARY_NAME" "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}"
     else
-        sudo "./$BINARY_NAME"
+        sudo "./$BINARY_NAME" "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}"
     fi
     printf "\n"
     success "Switcher Suite closed. Returned safely to your terminal."
@@ -373,4 +451,12 @@ else
     printf "${YELLOW}[i] File ready for deployment: %s/%s${NC}\n" "$PROJECT_DIR" "$BINARY_NAME"
     print_line
     printf "\n"
+fi
+
+# Leaving the alternate screen discards whatever was drawn in it (same as
+# quitting vim/less) -- pause so the final status above is actually seen
+# before that happens, instead of vanishing the instant the script ends.
+if [[ "$ALT_SCREEN_ACTIVE" -eq 1 ]]; then
+    printf '%sPress ENTER to return to your terminal...%s' "$DIM" "$NC"
+    read -r _ || true
 fi

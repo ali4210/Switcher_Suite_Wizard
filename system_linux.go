@@ -3,10 +3,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -376,21 +379,34 @@ func setDNS(iface string, servers []string, automatic bool) string {
 		return commandError("Failed to update DNS configuration", output, err)
 	}
 
-	_ = reactivateNetworkManagerConnection(connection)
+	activationResult := reactivateNetworkManagerConnection(connection)
 
+	var resolvedWarning string
 	if !automatic && len(servers) > 0 {
 		if isSystemdResolvedManaged() {
-			_, _ = applyResolvedDNS(iface, servers)
+			if out, rerr := applyResolvedDNS(iface, servers); rerr != nil {
+				resolvedWarning = "\n\n" + commandError(
+					"DNS was saved in NetworkManager, but resolvectl failed to apply it to the live resolver",
+					out,
+					rerr,
+				)
+			}
 		} else {
 			var buf strings.Builder
 			for _, s := range servers {
 				buf.WriteString("nameserver " + s + "\n")
 			}
-			_ = os.WriteFile("/etc/resolv.conf", []byte(buf.String()), 0644)
+			if werr := os.WriteFile("/etc/resolv.conf", []byte(buf.String()), 0644); werr != nil {
+				resolvedWarning = "\n\n" + commandError(
+					"DNS was saved in NetworkManager, but writing /etc/resolv.conf failed",
+					"",
+					werr,
+				)
+			}
 		}
 	}
 
-	return Green + "[✓] " + successMessage + NC
+	return Green + "[✓] " + successMessage + NC + "\n\n" + activationResult + resolvedWarning
 }
 
 func getCurrentProxy() string {
@@ -407,7 +423,7 @@ func getCurrentProxy() string {
 			host := strings.Trim(strings.TrimSpace(hostOut), "'\"")
 			port := strings.TrimSpace(portOut)
 			if host != "" && port != "0" {
-				return host + ":" + port
+				return net.JoinHostPort(host, port)
 			}
 		}
 	}
@@ -436,11 +452,24 @@ func getCurrentProxy() string {
 	return "DIRECT (Disabled)"
 }
 
+// buildLinuxProxyEnvContent renders the exact /etc/environment /
+// /etc/environment.d / profile.d content for a given endpoint. Pure and
+// side-effect-free so it can be unit tested directly: endpoint is expected
+// to already be the net.JoinHostPort form (bracketed for IPv6), which is
+// also exactly what a URL needs for its host:port component.
+func buildLinuxProxyEnvContent(endpoint string) string {
+	return fmt.Sprintf(
+		"http_proxy=\"http://%s/\"\nhttps_proxy=\"http://%s/\"\nall_proxy=\"socks5://%s/\"\nHTTP_PROXY=\"http://%s/\"\nHTTPS_PROXY=\"http://%s/\"\nALL_PROXY=\"socks5://%s/\"\nno_proxy=\"localhost,127.0.0.1,localaddress,.localdomain.com\"\n",
+		endpoint, endpoint, endpoint, endpoint, endpoint, endpoint,
+	)
+}
+
 func setSystemProxy(host, port string) string {
-	endpoint := host + ":" + port
+	endpoint := net.JoinHostPort(host, port)
 	saveActiveProxyRecord(endpoint)
 
-	// 1. GNOME / XFCE Desktop Proxy Settings
+	// 1. GNOME / XFCE Desktop Proxy Settings -- host and port stay separate
+	// arguments here, matching the gsettings schema's own host/port keys.
 	if commandExists("gsettings") {
 		_, _ = runCommand("gsettings", "set", "org.gnome.system.proxy", "mode", "manual")
 		_, _ = runCommand("gsettings", "set", "org.gnome.system.proxy.http", "host", host)
@@ -450,7 +479,7 @@ func setSystemProxy(host, port string) string {
 	}
 
 	// 2. Global Linux Environment Configuration
-	envContent := fmt.Sprintf("http_proxy=\"http://%s:%s/\"\nhttps_proxy=\"http://%s:%s/\"\nall_proxy=\"socks5://%s:%s/\"\nHTTP_PROXY=\"http://%s:%s/\"\nHTTPS_PROXY=\"http://%s:%s/\"\nALL_PROXY=\"socks5://%s:%s/\"\nno_proxy=\"localhost,127.0.0.1,localaddress,.localdomain.com\"\n", host, port, host, port, host, port, host, port, host, port, host, port)
+	envContent := buildLinuxProxyEnvContent(endpoint)
 	if err := os.WriteFile("/etc/environment", []byte(envContent), 0644); err != nil {
 		return commandError("Failed to write /etc/environment", "", err)
 	}
@@ -987,6 +1016,342 @@ func runNetworkTroubleshooter() []DiagnosticStep {
 func handleDirectBootCliShell() {
 	// Not required on Linux (Linux uses systemd multi-user.target / TTY framebuffers)
 }
-func isWindowsUTF8Ready() bool {
-	return true // Always true on Linux and macOS POSIX shells
+
+// ---------------------------------------------------------------------------
+// SSH Server (Install / Enable) -- Linux
+//
+// Every function below that actually decides something (which package
+// manager, which service unit, how to read a status report) is a pure
+// function taking its inputs as plain parameters -- including a lookup
+// closure in place of a direct runCommand/commandExists call where
+// detection is involved -- so tests can supply fake results instead of
+// touching this machine's real package manager, systemd, or firewall.
+// ---------------------------------------------------------------------------
+
+// linuxSSHPackageManagers lists the package managers checked, in a fixed
+// priority order (Debian-family first, since that's this project's
+// primary target distros).
+var linuxSSHPackageManagers = []string{"apt", "dnf", "yum", "pacman", "zypper", "apk"}
+
+// detectLinuxPackageManager returns the first package manager binary
+// exists reports as present, in linuxSSHPackageManagers' priority order,
+// or "" if none are. exists is injected (real callers pass commandExists)
+// so tests can fake PATH lookups.
+func detectLinuxPackageManager(exists func(string) bool) string {
+	for _, pm := range linuxSSHPackageManagers {
+		if exists(pm) {
+			return pm
+		}
+	}
+	return ""
+}
+
+// buildSSHInstallArgs returns the exact argv to install the OpenSSH
+// server package with the given package manager, or nil if pm is not one
+// of linuxSSHPackageManagers' recognized values. No interpolated/user
+// data: every element is a fixed literal.
+func buildSSHInstallArgs(pm string) []string {
+	switch pm {
+	case "apt":
+		return []string{"apt-get", "install", "-y", "openssh-server"}
+	case "dnf":
+		return []string{"dnf", "install", "-y", "openssh-server"}
+	case "yum":
+		return []string{"yum", "install", "-y", "openssh-server"}
+	case "pacman":
+		return []string{"pacman", "-S", "--noconfirm", "--needed", "openssh"}
+	case "zypper":
+		return []string{"zypper", "--non-interactive", "install", "openssh"}
+	case "apk":
+		return []string{"apk", "add", "openssh"}
+	default:
+		return nil
+	}
+}
+
+// linuxSSHServiceCandidates lists the systemd unit names checked, in
+// priority order: ssh.service is Debian/Ubuntu/Kali's name for it,
+// sshd.service is RHEL/Fedora/Arch/openSUSE's.
+var linuxSSHServiceCandidates = []string{"ssh.service", "sshd.service"}
+
+// pickLinuxSSHServiceName picks the first candidate in
+// linuxSSHServiceCandidates that listUnitFiles reports as an installed
+// unit (its output containing the unit name, matching
+// `systemctl list-unit-files <unit>`'s own output shape). Returns "" if
+// neither is installed (not yet installed, or a non-systemd system).
+// listUnitFiles is injected so tests can fake systemctl's output instead
+// of running it.
+func pickLinuxSSHServiceName(listUnitFiles func(unit string) (string, error)) string {
+	for _, unit := range linuxSSHServiceCandidates {
+		if out, err := listUnitFiles(unit); err == nil && strings.Contains(out, unit) {
+			return unit
+		}
+	}
+	return ""
+}
+
+// parseSystemctlIsActiveOutput reports whether `systemctl is-active <unit>`
+// output indicates the unit is actually running.
+func parseSystemctlIsActiveOutput(output string) bool {
+	return strings.TrimSpace(output) == "active"
+}
+
+// parseSystemctlIsEnabledOutput reports whether `systemctl is-enabled
+// <unit>` output indicates the unit is enabled to start at boot.
+func parseSystemctlIsEnabledOutput(output string) bool {
+	return strings.TrimSpace(output) == "enabled"
+}
+
+// parseSSHDConfigPorts extracts every "port N" directive from `sshd -T`
+// output (which normalizes keys to lowercase and prints one directive per
+// line), in the order they appear. There can legitimately be more than
+// one Port directive.
+func parseSSHDConfigPorts(sshdTOutput string) []int {
+	var ports []int
+	for _, line := range strings.Split(sshdTOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && strings.EqualFold(fields[0], "port") {
+			if p, err := strconv.Atoi(fields[1]); err == nil {
+				ports = append(ports, p)
+			}
+		}
+	}
+	return ports
+}
+
+// parseListeningPorts extracts the local TCP ports found in `ss -H -ltn`
+// style output (header-less; one socket per line, local address:port is
+// the 4th whitespace-separated field). Works for both IPv4
+// ("0.0.0.0:22") and bracketed IPv6 ("[::]:22") local addresses.
+func parseListeningPorts(ssOutput string) map[int]bool {
+	ports := map[int]bool{}
+	for _, line := range strings.Split(ssOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		localAddr := fields[3]
+		idx := strings.LastIndex(localAddr, ":")
+		if idx == -1 {
+			continue
+		}
+		if p, err := strconv.Atoi(localAddr[idx+1:]); err == nil {
+			ports[p] = true
+		}
+	}
+	return ports
+}
+
+// detectLinuxFirewallTool returns "ufw" or "firewalld" if exists reports
+// its CLI as present (ufw checked first, matching Debian/Ubuntu/Kali's
+// default), or "" if neither is.
+func detectLinuxFirewallTool(exists func(string) bool) string {
+	if exists("ufw") {
+		return "ufw"
+	}
+	if exists("firewall-cmd") {
+		return "firewalld"
+	}
+	return ""
+}
+
+// parseUfwStatusOutput parses `ufw status` output into whether ufw is
+// active at all, and whether it already has a rule allowing SSH (either
+// the named "OpenSSH" profile or a literal "22/tcp" rule).
+func parseUfwStatusOutput(output string) (active, allowsSSH bool) {
+	active = strings.Contains(output, "Status: active")
+	lower := strings.ToLower(output)
+	allowsSSH = strings.Contains(lower, "openssh") || strings.Contains(lower, "22/tcp")
+	return active, allowsSSH
+}
+
+// parseFirewalldStateOutput reports whether `firewall-cmd --state`
+// indicates firewalld is actually running.
+func parseFirewalldStateOutput(output string) bool {
+	return strings.TrimSpace(output) == "running"
+}
+
+// parseFirewalldServicesOutput reports whether "ssh" appears in
+// `firewall-cmd --list-services`' space-separated output.
+func parseFirewalldServicesOutput(output string) bool {
+	for _, svc := range strings.Fields(output) {
+		if svc == "ssh" {
+			return true
+		}
+	}
+	return false
+}
+
+// buildFirewallAllowCommands returns the argv command(s) that add an SSH
+// allow rule for the given firewall tool, in the order they must run.
+// firewalld needs a separate --reload to apply a --permanent change; ufw
+// does not.
+func buildFirewallAllowCommands(tool string) [][]string {
+	switch tool {
+	case "ufw":
+		return [][]string{{"ufw", "allow", "OpenSSH"}}
+	case "firewalld":
+		return [][]string{
+			{"firewall-cmd", "--permanent", "--add-service=ssh"},
+			{"firewall-cmd", "--reload"},
+		}
+	default:
+		return nil
+	}
+}
+
+func getSSHServerStatus() (SSHServerStatus, error) {
+	var status SSHServerStatus
+
+	status.Installed = commandExists("sshd")
+
+	if !commandExists("systemctl") {
+		status.Detail = "No systemd detected on this system -- service enable/active checks are not available here. Installing and testing the sshd configuration still works; start sshd using this system's own service manager."
+		return status, nil
+	}
+
+	status.ServiceName = pickLinuxSSHServiceName(func(unit string) (string, error) {
+		return runCommand("systemctl", "list-unit-files", unit)
+	})
+
+	if status.ServiceName != "" {
+		if out, err := runCommand("systemctl", "is-active", status.ServiceName); err == nil {
+			status.Running = parseSystemctlIsActiveOutput(out)
+		}
+		if out, err := runCommand("systemctl", "is-enabled", status.ServiceName); err == nil {
+			status.Enabled = parseSystemctlIsEnabledOutput(out)
+		}
+	}
+
+	if status.Installed {
+		if out, err := runCommand("sshd", "-T"); err == nil {
+			if ports := parseSSHDConfigPorts(out); len(ports) > 0 {
+				if ssOut, ssErr := runCommand("ss", "-H", "-ltn"); ssErr == nil {
+					listening := parseListeningPorts(ssOut)
+					for _, p := range ports {
+						if listening[p] {
+							status.ListeningPort = p
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	status.FirewallTool = detectLinuxFirewallTool(commandExists)
+	switch status.FirewallTool {
+	case "ufw":
+		if out, err := runCommand("ufw", "status"); err == nil {
+			status.FirewallActive, status.FirewallAllowsSSH = parseUfwStatusOutput(out)
+		}
+	case "firewalld":
+		if out, err := runCommand("firewall-cmd", "--state"); err == nil {
+			status.FirewallActive = parseFirewalldStateOutput(out)
+		}
+		if status.FirewallActive {
+			if out, err := runCommand("firewall-cmd", "--list-services"); err == nil {
+				status.FirewallAllowsSSH = parseFirewalldServicesOutput(out)
+			}
+		}
+	}
+
+	return status, nil
+}
+
+func enableSSHServer() (string, error) {
+	if !commandExists("sshd") {
+		pm := detectLinuxPackageManager(commandExists)
+		if pm == "" {
+			return "", errors.New("openssh-server is not installed and no supported package manager (apt/dnf/yum/pacman/zypper/apk) was found")
+		}
+		args := buildSSHInstallArgs(pm)
+		if out, err := runCommand(args[0], args[1:]...); err != nil {
+			return "", fmt.Errorf("failed to install openssh-server via %s: %w\n%s", pm, err, out)
+		}
+	}
+
+	// Generate any missing host keys. Idempotent: only creates the ones
+	// that don't already exist, so it's always safe to run.
+	if out, err := runCommand("ssh-keygen", "-A"); err != nil {
+		return "", fmt.Errorf("ssh-keygen -A failed: %w\n%s", err, out)
+	}
+
+	// Validate the configuration before touching the running service.
+	if out, err := runCommand("sshd", "-t"); err != nil {
+		return "", fmt.Errorf("sshd configuration test failed (sshd -t): %w\n%s", err, out)
+	}
+
+	if !commandExists("systemctl") {
+		return "openssh-server is installed and its configuration is valid, but no systemd was detected to enable/start it automatically -- start sshd using this system's own service manager.", nil
+	}
+
+	unit := pickLinuxSSHServiceName(func(u string) (string, error) {
+		return runCommand("systemctl", "list-unit-files", u)
+	})
+	if unit == "" {
+		// Freshly installed: the unit file exists now even though it
+		// didn't a moment ago. ssh.service is Debian/Ubuntu/Kali's name,
+		// this project's primary target.
+		unit = "ssh.service"
+	}
+
+	if out, err := runCommand("systemctl", "enable", "--now", unit); err != nil {
+		return "", fmt.Errorf("failed to enable/start %s: %w\n%s", unit, err, out)
+	}
+
+	// Some systems (socket-activated SSH) own the actual listener via
+	// ssh.socket rather than the service unit itself -- enable it too if
+	// present, best-effort.
+	if out, err := runCommand("systemctl", "list-unit-files", "ssh.socket"); err == nil && strings.Contains(out, "ssh.socket") {
+		_, _ = runCommand("systemctl", "enable", "--now", "ssh.socket")
+	}
+
+	status, _ := getSSHServerStatus()
+	if !status.Running {
+		return "", fmt.Errorf("sshd was enabled but systemctl reports %s is not active -- check `systemctl status %s` and the system journal", unit, unit)
+	}
+	if status.ListeningPort == 0 {
+		return "", errors.New("sshd is active, but no configured port (from sshd -T) could be confirmed listening via ss -- check binding/firewall configuration")
+	}
+
+	return fmt.Sprintf("SSH server installed, enabled, and listening on port %d.", status.ListeningPort), nil
+}
+
+func disableSSHServer() (string, error) {
+	if !commandExists("systemctl") {
+		return "", errors.New("no systemd detected on this system -- stop/disable sshd using this system's own service manager")
+	}
+
+	unit := pickLinuxSSHServiceName(func(u string) (string, error) {
+		return runCommand("systemctl", "list-unit-files", u)
+	})
+	if unit == "" {
+		return "", errors.New("no installed ssh.service or sshd.service unit was found -- nothing to disable")
+	}
+
+	if out, err := runCommand("systemctl", "disable", "--now", unit); err != nil {
+		return "", fmt.Errorf("failed to disable %s: %w\n%s", unit, err, out)
+	}
+
+	if out, err := runCommand("systemctl", "list-unit-files", "ssh.socket"); err == nil && strings.Contains(out, "ssh.socket") {
+		_, _ = runCommand("systemctl", "disable", "--now", "ssh.socket")
+	}
+
+	return "SSH server disabled (stopped, and will not start on boot). The openssh-server package itself was left installed.", nil
+}
+
+func ensureFirewallAllowsSSH() (string, error) {
+	tool := detectLinuxFirewallTool(commandExists)
+	if tool == "" {
+		return "No supported firewall tool (ufw/firewalld) was detected -- nothing to change.", nil
+	}
+
+	for _, args := range buildFirewallAllowCommands(tool) {
+		if out, err := runCommand(args[0], args[1:]...); err != nil {
+			return "", fmt.Errorf("failed to run `%s`: %w\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	return fmt.Sprintf("Firewall rule added: %s now allows SSH.", tool), nil
 }
