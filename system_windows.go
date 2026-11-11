@@ -24,7 +24,6 @@ var (
 	procSetConsoleWindowInfo       = kernel32.NewProc("SetConsoleWindowInfo")
 	procSetConsoleOutputCP         = kernel32.NewProc("SetConsoleOutputCP")
 	procSetConsoleCP               = kernel32.NewProc("SetConsoleCP")
-	procGetConsoleOutputCP         = kernel32.NewProc("GetConsoleOutputCP")
 )
 
 const (
@@ -72,11 +71,6 @@ func enableWindowsANSI() {
 	_, _, _ = procSetConsoleScreenBufferSize.Call(handle, uintptr(*(*int32)(unsafe.Pointer(&bufferSize))))
 	_, _, _ = procSetConsoleWindowInfo.Call(handle, 1, uintptr(unsafe.Pointer(&windowRect)))
 }
-func isWindowsUTF8Ready() bool {
-	ret, _, _ := procGetConsoleOutputCP.Call()
-	return uint32(ret) == 65001
-}
-
 func execCommand(name string, args ...string) *exec.Cmd {
 	return exec.Command(name, args...)
 }

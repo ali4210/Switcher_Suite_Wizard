@@ -537,7 +537,3 @@ func disableGlobalCLI() (string, error) {
 func handleDirectBootCliShell() {
 	// Not required on macOS
 }
-
-func isWindowsUTF8Ready() bool {
-	return true
-}

@@ -1000,6 +1000,3 @@ func runNetworkTroubleshooter() []DiagnosticStep {
 func handleDirectBootCliShell() {
 	// Not required on Linux (Linux uses systemd multi-user.target / TTY framebuffers)
 }
-func isWindowsUTF8Ready() bool {
-	return true // Always true on Linux and macOS POSIX shells
-}
