@@ -1062,3 +1062,45 @@ func TestBuildWindowsCliShim_MaliciousExecPathNeverBreaksOutOfQuotes(t *testing.
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SSH Server -- shared, OS-agnostic idempotency/firewall-prompt decisions
+// ---------------------------------------------------------------------------
+
+func TestSSHServerNeedsSetup(t *testing.T) {
+	cases := []struct {
+		name   string
+		status SSHServerStatus
+		want   bool
+	}{
+		{"fully active, nothing to do", SSHServerStatus{Installed: true, Enabled: true, Running: true}, false},
+		{"not installed", SSHServerStatus{Installed: false, Enabled: false, Running: false}, true},
+		{"installed but not enabled", SSHServerStatus{Installed: true, Enabled: false, Running: true}, true},
+		{"installed and enabled but not running", SSHServerStatus{Installed: true, Enabled: true, Running: false}, true},
+		{"nothing set", SSHServerStatus{}, true},
+	}
+	for _, c := range cases {
+		if got := sshServerNeedsSetup(c.status); got != c.want {
+			t.Errorf("%s: sshServerNeedsSetup(%+v) = %v, want %v", c.name, c.status, got, c.want)
+		}
+	}
+}
+
+func TestSSHServerNeedsFirewallPrompt(t *testing.T) {
+	cases := []struct {
+		name   string
+		status SSHServerStatus
+		want   bool
+	}{
+		{"no firewall tool (e.g. macOS) -- never prompt", SSHServerStatus{FirewallTool: "", FirewallActive: true, FirewallAllowsSSH: false}, false},
+		{"firewall tool present but inactive -- no prompt", SSHServerStatus{FirewallTool: "ufw", FirewallActive: false, FirewallAllowsSSH: false}, false},
+		{"firewall active and already allows ssh -- no prompt", SSHServerStatus{FirewallTool: "ufw", FirewallActive: true, FirewallAllowsSSH: true}, false},
+		{"firewall active and blocks ssh -- prompt", SSHServerStatus{FirewallTool: "ufw", FirewallActive: true, FirewallAllowsSSH: false}, true},
+		{"windows firewall active and blocks ssh -- prompt", SSHServerStatus{FirewallTool: "Windows Defender Firewall", FirewallActive: true, FirewallAllowsSSH: false}, true},
+	}
+	for _, c := range cases {
+		if got := sshServerNeedsFirewallPrompt(c.status); got != c.want {
+			t.Errorf("%s: sshServerNeedsFirewallPrompt(%+v) = %v, want %v", c.name, c.status, got, c.want)
+		}
+	}
+}

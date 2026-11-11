@@ -698,3 +698,48 @@ if %%errorLevel%% == 0 (
 )
 `, cliShimMarker, execPath, windowsCliShimAllowedArg, quotedPath, windowsCliShimAllowedArg, quotedPath, quotedPath)
 }
+
+// ---------------------------------------------------------------------------
+// SSH Server (Install / Enable) -- shared status type and menu-support
+// helpers. Each system_<os>.go file defines the same four functions
+// (getSSHServerStatus, enableSSHServer, disableSSHServer,
+// ensureFirewallAllowsSSH) for its own OS; the menu flow that calls them
+// lives in sshServerMenu below, in a later commit, once all three OS
+// implementations exist.
+// ---------------------------------------------------------------------------
+
+// SSHServerStatus is the cross-platform snapshot getSSHServerStatus returns.
+// ListeningPort is 0 when not currently listening. ServiceName is the
+// systemd unit name on Linux ("ssh.service"/"sshd.service"), the Windows
+// service name ("sshd"), or empty where the concept doesn't apply (macOS).
+// FirewallTool is empty when no separate firewall step is needed for that
+// OS (e.g. macOS), in which case the menu never offers the firewall prompt.
+type SSHServerStatus struct {
+	Installed         bool
+	Enabled           bool
+	Running           bool
+	ListeningPort     int
+	ServiceName       string
+	FirewallTool      string
+	FirewallActive    bool
+	FirewallAllowsSSH bool
+	Detail            string
+}
+
+// sshServerNeedsSetup reports whether enableSSHServer actually has to
+// change anything, versus the server already being installed, enabled,
+// and running -- i.e. whether the "ensure enabled" path is a real no-op.
+// Pure and OS-agnostic, so it's the one piece of the idempotency decision
+// that's directly unit-testable without executing anything.
+func sshServerNeedsSetup(status SSHServerStatus) bool {
+	return !status.Installed || !status.Enabled || !status.Running
+}
+
+// sshServerNeedsFirewallPrompt reports whether the menu should ask the
+// separate firewall-allow confirmation: only when that OS has a firewall
+// concept for this feature (FirewallTool != "") and it's active but
+// doesn't already allow SSH. Never true when FirewallTool is empty
+// (e.g. macOS, where ensureFirewallAllowsSSH is a no-op).
+func sshServerNeedsFirewallPrompt(status SSHServerStatus) bool {
+	return status.FirewallTool != "" && status.FirewallActive && !status.FirewallAllowsSSH
+}
