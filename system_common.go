@@ -743,3 +743,180 @@ func sshServerNeedsSetup(status SSHServerStatus) bool {
 func sshServerNeedsFirewallPrompt(status SSHServerStatus) bool {
 	return status.FirewallTool != "" && status.FirewallActive && !status.FirewallAllowsSSH
 }
+
+func yesNo(b bool) string {
+	if b {
+		return "Yes"
+	}
+	return "No"
+}
+
+// formatSSHServerStatus renders the status report shown at the top of
+// sshServerMenu, shared across all three OSes since SSHServerStatus
+// itself is OS-agnostic.
+func formatSSHServerStatus(s SSHServerStatus) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Installed: %s\n", yesNo(s.Installed))
+	fmt.Fprintf(&b, "Enabled:   %s\n", yesNo(s.Enabled))
+	fmt.Fprintf(&b, "Running:   %s\n", yesNo(s.Running))
+	if s.ListeningPort > 0 {
+		fmt.Fprintf(&b, "Listening: port %d\n", s.ListeningPort)
+	} else {
+		b.WriteString("Listening: not confirmed\n")
+	}
+	if s.FirewallTool != "" {
+		fmt.Fprintf(&b, "Firewall:  %s (active: %s, allows SSH: %s)\n", s.FirewallTool, yesNo(s.FirewallActive), yesNo(s.FirewallAllowsSSH))
+	}
+	if s.Detail != "" {
+		fmt.Fprintf(&b, "Note: %s\n", s.Detail)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// sshServerMenu is the shared entry point wired to the main menu's
+// "SSH Server (Install / Enable)" entry. It calls only the four
+// functions every system_<os>.go file defines identically
+// (getSSHServerStatus/enableSSHServer/disableSSHServer/
+// ensureFirewallAllowsSSH) -- no platform picker, the OS the binary was
+// built for is the only one in play.
+func sshServerMenu() {
+	for {
+		status, err := getSSHServerStatus()
+		if err != nil {
+			showHeader("SSH SERVER")
+			printBoxRow(" "+FgRose+"[!] Failed to read SSH server status: "+err.Error()+Reset, "\n")
+			pauseAction()
+			return
+		}
+
+		enableLabel := "Install / Enable SSH Server"
+		if !sshServerNeedsSetup(status) {
+			enableLabel = "Re-Confirm SSH Server Is Enabled"
+		}
+
+		choice := SelectFromOptions(
+			"SSH SERVER (INSTALL / ENABLE)",
+			formatSSHServerStatus(status)+"\nSelect Action:",
+			[]string{enableLabel, "Disable SSH Server", "Return to Main Menu"},
+		)
+
+		switch choice {
+		case 0:
+			sshServerEnableFlow(status)
+		case 1:
+			sshServerDisableFlow(status)
+		default:
+			return
+		}
+	}
+}
+
+func sshServerEnableFlow(status SSHServerStatus) {
+	showHeader("SSH SERVER")
+
+	if !sshServerNeedsSetup(status) {
+		printBoxRow(" "+FgEmerald+"[✓] SSH server is already installed, enabled, and running."+Reset, "\n")
+		if status.ListeningPort > 0 {
+			printBoxRow(" "+FgCyan+fmt.Sprintf("[i] Listening on port %d.", status.ListeningPort)+Reset, "\n")
+		}
+		printBoxBlankRow("\n")
+		if !confirmAction("Re-run the enable steps anyway, to make sure everything is still correctly configured?") {
+			pauseAction()
+			return
+		}
+	} else {
+		printBoxRow(" "+FgAmber+"[i] This will:"+Reset, "\n")
+		if !status.Installed {
+			printBoxRow("     - Install the OpenSSH server", "\n")
+		}
+		printBoxRow("     - Validate the SSH daemon configuration", "\n")
+		printBoxRow("     - Enable and start the SSH service", "\n")
+		printBoxBlankRow("\n")
+		if !confirmAction("Proceed with installing/enabling the SSH server?") {
+			showHeader("ACTION CANCELLED")
+			printBoxRow(" "+FgAmber+"=> Operation cancelled by user."+Reset, "\n")
+			pauseAction()
+			return
+		}
+	}
+
+	if !requirePrivilege() {
+		return
+	}
+
+	showHeader("CONFIGURING SSH SERVER")
+	res, err := enableSSHServer()
+	if err != nil {
+		printBoxRow(" "+FgRose+"[!] Error: "+err.Error()+Reset, "\n")
+		pauseAction()
+		return
+	}
+	printBoxRow(" "+FgEmerald+"[✓] "+res+Reset, "\n")
+
+	newStatus, _ := getSSHServerStatus()
+
+	if sshServerNeedsFirewallPrompt(newStatus) {
+		printBoxBlankRow("\n")
+		printBoxRow(" "+FgAmber+Bold+"[!] "+newStatus.FirewallTool+" is active and does not currently allow SSH."+Reset, "\n")
+		if confirmAction("Allow SSH through " + newStatus.FirewallTool + " now?") {
+			fwRes, fwErr := ensureFirewallAllowsSSH()
+			if fwErr != nil {
+				printBoxRow(" "+FgRose+"[!] Firewall error: "+fwErr.Error()+Reset, "\n")
+			} else {
+				printBoxRow(" "+FgEmerald+"[✓] "+fwRes+Reset, "\n")
+			}
+		} else {
+			printBoxRow(" "+FgAmber+"[i] Firewall left unchanged -- SSH may not be reachable from other hosts until you allow it."+Reset, "\n")
+		}
+	}
+
+	printBoxBlankRow("\n")
+	printBoxRow(" "+FgCyan+Bold+"[i] Next step:"+Reset, "\n")
+	printBoxRow("     ssh "+getCurrentUser()+"@<this machine's IP, listed below>", "\n")
+	for _, ip := range getAllSystemIPs() {
+		printBoxRow("     "+ip, "\n")
+	}
+	pauseAction()
+}
+
+func sshServerDisableFlow(status SSHServerStatus) {
+	showHeader("DISABLE SSH SERVER")
+
+	if !status.Installed && !status.Enabled && !status.Running {
+		printBoxRow(" "+FgAmber+"[i] SSH server is not installed or enabled -- nothing to disable."+Reset, "\n")
+		pauseAction()
+		return
+	}
+
+	if sshConn := os.Getenv("SSH_CONNECTION"); sshConn != "" {
+		printBoxRow(" "+FgRose+Bold+"[!] WARNING: this session appears to be connected over SSH right now"+Reset, "\n")
+		printBoxRow("     ("+FgMuted+"SSH_CONNECTION="+sshConn+Reset+").", "\n")
+		printBoxRow("     Disabling the SSH server now could lock you out if you have no other", "\n")
+		printBoxRow("     way to reach this machine.", "\n")
+		printBoxBlankRow("\n")
+		if !confirmAction("Disable SSH anyway, even though this session is connected over SSH right now?") {
+			showHeader("ACTION CANCELLED")
+			printBoxRow(" "+FgAmber+"=> Operation cancelled by user."+Reset, "\n")
+			pauseAction()
+			return
+		}
+	} else if !confirmAction("Disable the SSH server? It will stop and no longer start automatically.") {
+		showHeader("ACTION CANCELLED")
+		printBoxRow(" "+FgAmber+"=> Operation cancelled by user."+Reset, "\n")
+		pauseAction()
+		return
+	}
+
+	if !requirePrivilege() {
+		return
+	}
+
+	showHeader("DISABLING SSH SERVER")
+	res, err := disableSSHServer()
+	if err != nil {
+		printBoxRow(" "+FgRose+"[!] Error: "+err.Error()+Reset, "\n")
+	} else {
+		printBoxRow(" "+FgEmerald+"[✓] "+res+Reset, "\n")
+	}
+	pauseAction()
+}

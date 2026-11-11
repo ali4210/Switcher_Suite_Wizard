@@ -411,6 +411,53 @@ func showHeader(title string) {
 	printHeaderSection(title, "\n")
 }
 
+// mainMenuItem and mainMenuItems are the single source of truth for the
+// main menu's contents: printMainMenu renders them, selectMainMenu derives
+// its wraparound bounds and EOF/quit sentinel from len(mainMenuItems()),
+// and selectMainMenuFallback's numbered choices are kept in step with it
+// by hand (its header text is custom per-category, not auto-generated).
+type mainMenuItem struct {
+	category string
+	title    string
+	desc     string
+}
+
+func mainMenuItems() []mainMenuItem {
+	return []mainMenuItem{
+		{"SYSTEM MANAGEMENT", "System Mode Switcher", "Switch between Graphical Desktop GUI and TTY / CLI terminal mode"},
+		{"SYSTEM MANAGEMENT", "System Hostname Manager", "Change system computer name in real-time or restore previous name"},
+		{"NETWORK TOOLS", "IP Address Manager", "Inspect all adapter IPs, configure static IPs, and manage aliases"},
+		{"NETWORK TOOLS", "DNS Resolver Switcher", "Apply Public DNS profiles, ping test resolvers, or restore DHCP"},
+		{"NETWORK TOOLS", "Proxy Configuration", "Enable, configure, or disable operating-system proxy endpoints"},
+		{"NETWORK TOOLS", "Restart Network Service", "Force restart NetworkManager daemon or refresh network bindings"},
+		{"NETWORK TOOLS", "Automated Network Troubleshooter", "Run real-time diagnostics, fix missing gateways, and restore connectivity"},
+		{"GLOBAL INTEGRATION", "Global CLI Integration", "Access Switcher Suite globally using 'switcher-wizard' with auto-root"},
+		{"REMOTE ACCESS", "SSH Server (Install / Enable)", "Install, enable, or disable the OpenSSH server, and manage its firewall rule"},
+		{"CONTROL", "Exit Switcher Suite", "Terminate current session and return safely to shell"},
+	}
+}
+
+// menuMoveUp / menuMoveDown implement the up/down arrow wraparound shared
+// by the main menu and SelectFromOptions, taking the real item count as a
+// parameter instead of a hardcoded number -- so adding or removing a menu
+// entry can never desync the wraparound logic from the actual list.
+func menuMoveUp(selected, count int) int {
+	if count <= 0 {
+		return 0
+	}
+	if selected <= 0 {
+		return count - 1
+	}
+	return selected - 1
+}
+
+func menuMoveDown(selected, count int) int {
+	if count <= 0 {
+		return 0
+	}
+	return (selected + 1) % count
+}
+
 func printMainMenu(selected int, newline string) {
 	var buf strings.Builder
 	buf.WriteString("\033[H\033[2J")
@@ -530,21 +577,7 @@ func printMainMenu(selected int, newline string) {
 	buf.WriteString(BorderColor + "║" + Reset + padDisplayWidth(modHeader, w-2) + BorderColor + "║" + Reset + "\033[K" + newline)
 	buf.WriteString(BorderColor + "╠" + strings.Repeat("═", w-2) + "╣" + Reset + "\033[K" + newline)
 
-	menuItems := []struct {
-		category string
-		title    string
-		desc     string
-	}{
-		{"SYSTEM MANAGEMENT", "System Mode Switcher", "Switch between Graphical Desktop GUI and TTY / CLI terminal mode"},
-		{"SYSTEM MANAGEMENT", "System Hostname Manager", "Change system computer name in real-time or restore previous name"},
-		{"NETWORK TOOLS", "IP Address Manager", "Inspect all adapter IPs, configure static IPs, and manage aliases"},
-		{"NETWORK TOOLS", "DNS Resolver Switcher", "Apply Public DNS profiles, ping test resolvers, or restore DHCP"},
-		{"NETWORK TOOLS", "Proxy Configuration", "Enable, configure, or disable operating-system proxy endpoints"},
-		{"NETWORK TOOLS", "Restart Network Service", "Force restart NetworkManager daemon or refresh network bindings"},
-		{"NETWORK TOOLS", "Automated Network Troubleshooter", "Run real-time diagnostics, fix missing gateways, and restore connectivity"},
-		{"GLOBAL INTEGRATION", "Global CLI Integration", "Access Switcher Suite globally using 'switcher-wizard' with auto-root"},
-		{"CONTROL", "Exit Switcher Suite", "Terminate current session and return safely to shell"},
-	}
+	menuItems := mainMenuItems()
 
 	lastCategory := ""
 
@@ -641,6 +674,9 @@ func selectMainMenu() int {
 	}
 	defer exitRawMode(fd, oldState)
 
+	itemCount := len(mainMenuItems())
+	exitIndex := itemCount - 1
+
 	selected := 0
 	reader := bufio.NewReader(os.Stdin)
 
@@ -652,14 +688,14 @@ func selectMainMenu() int {
 			// stdin closed (EOF, no controlling TTY, etc.) -- treat as quit
 			// instead of busy-looping forever on a ReadByte that will keep
 			// returning the same error.
-			return 8
+			return exitIndex
 		}
 
 		switch key {
 		case '\r', '\n':
 			return selected
 		case 'q', 'Q', 3:
-			return 8
+			return exitIndex
 		case 27:
 			next1, err1 := reader.ReadByte()
 			next2, err2 := reader.ReadByte()
@@ -668,13 +704,9 @@ func selectMainMenu() int {
 			}
 			switch next2 {
 			case 'A':
-				if selected == 0 {
-					selected = 8
-				} else {
-					selected--
-				}
+				selected = menuMoveUp(selected, itemCount)
 			case 'B':
-				selected = (selected + 1) % 9
+				selected = menuMoveDown(selected, itemCount)
 			}
 		}
 	}
@@ -755,13 +787,9 @@ func SelectFromOptions(title, prompt string, options []string) int {
 			}
 			switch next2 {
 			case 'A':
-				if selected == 0 {
-					selected = len(options) - 1
-				} else {
-					selected--
-				}
+				selected = menuMoveUp(selected, len(options))
 			case 'B':
-				selected = (selected + 1) % len(options)
+				selected = menuMoveDown(selected, len(options))
 			}
 		}
 	}
@@ -782,6 +810,9 @@ func selectMainMenuFallback() int {
 	printBoxBlankRow("\n")
 	printBoxRow(" "+FgIndigo+Bold+"── GLOBAL INTEGRATION "+BorderColor+"──────────────────────"+Reset, "\n")
 	printBoxRow("  [8] Global CLI Integration", "\n")
+	printBoxBlankRow("\n")
+	printBoxRow(" "+FgIndigo+Bold+"── REMOTE ACCESS "+BorderColor+"─────────────────────────────"+Reset, "\n")
+	printBoxRow("  [9] SSH Server (Install / Enable)", "\n")
 	printBoxBlankRow("\n")
 	printBoxRow("  [0] Exit Wizard", "\n")
 	printBoxSeparator("\n")
@@ -804,8 +835,10 @@ func selectMainMenuFallback() int {
 		return 6
 	case "8":
 		return 7
-	default:
+	case "9":
 		return 8
+	default:
+		return len(mainMenuItems()) - 1
 	}
 }
 
@@ -1786,6 +1819,8 @@ func main() {
 			networkTroubleshooterFlow()
 		case 7:
 			globalCliMenu()
+		case 8:
+			sshServerMenu()
 		default:
 			restoreNormalScreen()
 			os.Exit(0)

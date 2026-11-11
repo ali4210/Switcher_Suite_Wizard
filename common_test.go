@@ -1104,3 +1104,77 @@ func TestSSHServerNeedsFirewallPrompt(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Main menu wraparound -- derived from the real item count, not a
+// hardcoded number (this is exactly the bug the SSH Server menu entry
+// would otherwise have reintroduced: adding a 10th item without updating
+// a hardcoded 8/9 elsewhere).
+// ---------------------------------------------------------------------------
+
+func TestMainMenuItemsCount(t *testing.T) {
+	// Sanity check that catches an edit to mainMenuItems() that forgets a
+	// category, not a specific magic number: the main menu dispatch
+	// switch in main() has one case per item except the last (Exit, the
+	// default case), so this is "at least a couple of real entries plus
+	// the always-present Exit", not an exact hardcoded count.
+	items := mainMenuItems()
+	if len(items) < 2 {
+		t.Fatalf("mainMenuItems() returned %d items, want at least 2", len(items))
+	}
+	if items[len(items)-1].title != "Exit Switcher Suite" {
+		t.Errorf("mainMenuItems() last item = %q, want the Exit entry last", items[len(items)-1].title)
+	}
+}
+
+func TestMenuMoveUp(t *testing.T) {
+	cases := []struct {
+		name          string
+		selected, cnt int
+		want          int
+	}{
+		{"middle of a 10-item menu", 5, 10, 4},
+		{"wraps from 0 to the last index", 0, 10, 9},
+		{"single-item menu wraps to itself", 0, 1, 0},
+		{"zero count never panics or goes negative", 0, 0, 0},
+	}
+	for _, c := range cases {
+		if got := menuMoveUp(c.selected, c.cnt); got != c.want {
+			t.Errorf("%s: menuMoveUp(%d, %d) = %d, want %d", c.name, c.selected, c.cnt, got, c.want)
+		}
+	}
+}
+
+func TestMenuMoveDown(t *testing.T) {
+	cases := []struct {
+		name          string
+		selected, cnt int
+		want          int
+	}{
+		{"middle of a 10-item menu", 5, 10, 6},
+		{"wraps from the last index to 0", 9, 10, 0},
+		{"single-item menu wraps to itself", 0, 1, 0},
+		{"zero count never panics or divides by zero", 0, 0, 0},
+	}
+	for _, c := range cases {
+		if got := menuMoveDown(c.selected, c.cnt); got != c.want {
+			t.Errorf("%s: menuMoveDown(%d, %d) = %d, want %d", c.name, c.selected, c.cnt, got, c.want)
+		}
+	}
+}
+
+// TestSelectMainMenuWraparoundMatchesItemCount is the specific regression
+// test for this fix: selectMainMenu must derive its wraparound bounds
+// from len(mainMenuItems()), not a number that has to be remembered and
+// hand-updated every time a menu entry is added or removed.
+func TestSelectMainMenuWraparoundMatchesItemCount(t *testing.T) {
+	itemCount := len(mainMenuItems())
+	exitIndex := itemCount - 1
+
+	if got := menuMoveUp(0, itemCount); got != exitIndex {
+		t.Errorf("menuMoveUp(0, %d) = %d, want %d (pressing Up from the first item must land on Exit, the last item)", itemCount, got, exitIndex)
+	}
+	if got := menuMoveDown(exitIndex, itemCount); got != 0 {
+		t.Errorf("menuMoveDown(%d, %d) = %d, want 0 (pressing Down from Exit must wrap back to the first item)", exitIndex, itemCount, got)
+	}
+}
