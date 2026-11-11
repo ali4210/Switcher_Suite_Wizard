@@ -832,7 +832,7 @@ func disableGlobalCLI() (string, error) {
 		filepath.Join("/usr/local/bin", cmdName),
 		filepath.Join("/usr/bin", cmdName),
 	} {
-		if fileHasCliShimMarker(p) {
+		if isOwnedCliShimFile(p) {
 			_ = os.Remove(p)
 		}
 	}

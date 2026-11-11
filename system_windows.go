@@ -713,7 +713,7 @@ func disableGlobalCLI() (string, error) {
 		filepath.Join("C:\\Windows\\System32", cmdName+".cmd"),
 		filepath.Join("C:\\Windows\\System32", cmdName+".bat"),
 	} {
-		if fileHasCliShimMarker(p) {
+		if isOwnedCliShimFile(p) {
 			_ = os.Remove(p)
 		}
 	}

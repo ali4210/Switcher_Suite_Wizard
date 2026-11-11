@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -815,5 +816,123 @@ func TestAutoElevateArgsNeverContainRawInjection(t *testing.T) {
 	quoted := powerShellSingleQuote("'; Start-Process calc.exe; '")
 	if strings.Count(quoted, "''") < 2 {
 		t.Errorf("powerShellSingleQuote did not double-escape embedded quotes: %q", quoted)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// N1 follow-up: legacy (pre-marker) shim recognition, so files written by
+// an older version of this tool don't get permanently stuck (un-reclaimable
+// and un-removable) after the marker/collision checks were introduced.
+// ---------------------------------------------------------------------------
+
+// renderLegacyTemplateForTest replaces literal "%s" placeholders in a
+// legacy shim template with values, in order. It deliberately does not use
+// fmt.Sprintf: the legacy Windows template contains literal batch tokens
+// like %errorLevel% and %~1 that Sprintf's verb parser would otherwise try
+// (and fail) to interpret as format verbs.
+func renderLegacyTemplateForTest(template string, values ...string) string {
+	rendered := template
+	for _, v := range values {
+		rendered = strings.Replace(rendered, "%s", v, 1)
+	}
+	return rendered
+}
+
+func TestIsOwnedCliShimFile_CurrentMarker(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "shim")
+	content := "#!/bin/bash\n# " + cliShimMarker + "\nexec sudo \"/opt/tool\" \"$@\"\n"
+	if err := os.WriteFile(p, []byte(content), 0755); err != nil {
+		t.Fatalf("setup WriteFile failed: %v", err)
+	}
+	if !isOwnedCliShimFile(p) {
+		t.Error("isOwnedCliShimFile with current marker = false, want true")
+	}
+}
+
+func TestIsOwnedCliShimFile_LegacyUnixTemplate(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "shim")
+	content := renderLegacyTemplateForTest(legacyUnixShimTemplate, "/usr/local/bin/Switcher_Suite_Wizard")
+	if err := os.WriteFile(p, []byte(content), 0755); err != nil {
+		t.Fatalf("setup WriteFile failed: %v", err)
+	}
+	if !isOwnedCliShimFile(p) {
+		t.Error("isOwnedCliShimFile with exact legacy Unix template = false, want true")
+	}
+}
+
+func TestIsOwnedCliShimFile_LegacyWindowsTemplate(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "shim.cmd")
+	execPath := `C:\Program Files\Switcher\Switcher_Suite_Wizard.exe`
+	content := renderLegacyTemplateForTest(legacyWindowsShimTemplate, execPath, execPath, execPath)
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatalf("setup WriteFile failed: %v", err)
+	}
+	if !isOwnedCliShimFile(p) {
+		t.Error("isOwnedCliShimFile with exact legacy Windows template = false, want true")
+	}
+}
+
+func TestIsOwnedCliShimFile_ForeignFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "shim")
+	if err := os.WriteFile(p, []byte("#!/bin/bash\necho 'not ours'\n"), 0755); err != nil {
+		t.Fatalf("setup WriteFile failed: %v", err)
+	}
+	if isOwnedCliShimFile(p) {
+		t.Error("isOwnedCliShimFile with unrelated content = true, want false")
+	}
+}
+
+func TestIsOwnedCliShimFile_ForeignFileResemblingLegacy(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "shim")
+	// One extra, unrelated line disqualifies it -- matching the legacy
+	// template means exact, not "looks similar."
+	content := "#!/bin/bash\necho hello\nexec sudo \"/opt/tool\" \"$@\"\n"
+	if err := os.WriteFile(p, []byte(content), 0755); err != nil {
+		t.Fatalf("setup WriteFile failed: %v", err)
+	}
+	if isOwnedCliShimFile(p) {
+		t.Error("isOwnedCliShimFile with a foreign file that merely resembles the legacy template = true, want false")
+	}
+}
+
+func TestCheckCliAliasSafeToClaim_LegacyShimAllowsReenableAndDisable(t *testing.T) {
+	dir := t.TempDir()
+	candidate := filepath.Join(dir, "switcher-wizard")
+	content := fmt.Sprintf(legacyUnixShimTemplate, "/usr/local/bin/Switcher_Suite_Wizard")
+	if err := os.WriteFile(candidate, []byte(content), 0755); err != nil {
+		t.Fatalf("setup WriteFile failed: %v", err)
+	}
+
+	// Re-enabling the default alias over a legacy shim must be allowed...
+	if err := checkCliAliasSafeToClaim("switcher-wizard", []string{candidate}); err != nil {
+		t.Errorf("checkCliAliasSafeToClaim should allow re-claiming a legacy shim, got error: %v", err)
+	}
+	// ...and disable's removal predicate (isOwnedCliShimFile) must agree
+	// it's safe to delete.
+	if !isOwnedCliShimFile(candidate) {
+		t.Error("isOwnedCliShimFile should consider a legacy shim removable by disable, got false")
+	}
+}
+
+func TestCheckCliAliasSafeToClaim_ForeignFileSimilarNameStillRefused(t *testing.T) {
+	dir := t.TempDir()
+	candidate := filepath.Join(dir, "switcher-wizard")
+	// A totally unrelated real file that happens to sit at the exact
+	// candidate path, under the exact default alias name, must still be
+	// refused -- and must not be deletable by disable either.
+	if err := os.WriteFile(candidate, []byte("#!/bin/bash\necho 'some other unrelated tool'\n"), 0755); err != nil {
+		t.Fatalf("setup WriteFile failed: %v", err)
+	}
+
+	if err := checkCliAliasSafeToClaim("switcher-wizard", []string{candidate}); err == nil {
+		t.Error("checkCliAliasSafeToClaim should refuse a foreign file at the candidate path even under the default alias name, got nil")
+	}
+	if isOwnedCliShimFile(candidate) {
+		t.Error("isOwnedCliShimFile should not consider an unrelated foreign file removable, got true")
 	}
 }

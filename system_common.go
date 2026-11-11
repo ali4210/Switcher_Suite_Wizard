@@ -140,12 +140,87 @@ func fileHasCliShimMarker(path string) bool {
 	return strings.Contains(string(data), cliShimMarker)
 }
 
+// legacyUnixShimTemplate and legacyWindowsShimTemplate are the exact
+// fmt.Sprintf templates this tool wrote for its Global CLI shims *before*
+// the shim-marker comment was introduced. "%s" marks where the executable
+// path was substituted in (one or more times); everything else is fixed,
+// literal template text. Kept here only so legacyShimPatterns can match
+// against them -- never used to write a new shim.
+const legacyUnixShimTemplate = "#!/bin/bash\nexec sudo \"%s\" \"$@\"\n"
+
+const legacyWindowsShimTemplate = `@echo off
+net session >nul 2>&1
+if %errorLevel% == 0 (
+    "%s" %*
+) else (
+    if "%~1"=="" (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%s' -Verb RunAs"
+    ) else (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%s' -ArgumentList '%*' -Verb RunAs"
+    )
+)
+`
+
+// legacyShimTemplateToPattern turns a legacy fmt.Sprintf template (one that
+// substitutes only "%s" -- always the executable path -- into otherwise
+// fixed text) into a regexp that matches any rendering of that template,
+// treating every "%s" position as a wildcard that can't itself contain a
+// quote or newline (an executable path never legitimately does).
+func legacyShimTemplateToPattern(template string) *regexp.Regexp {
+	parts := strings.Split(template, "%s")
+	escaped := make([]string, len(parts))
+	for i, p := range parts {
+		escaped[i] = regexp.QuoteMeta(p)
+	}
+	return regexp.MustCompile("^" + strings.Join(escaped, `[^'"\n]*`) + "$")
+}
+
+var legacyShimPatterns = []*regexp.Regexp{
+	legacyShimTemplateToPattern(legacyUnixShimTemplate),
+	legacyShimTemplateToPattern(legacyWindowsShimTemplate),
+}
+
+// isLegacyCliShimContent reports whether content is byte-for-byte what one
+// of this tool's pre-marker releases would have written for some
+// executable path. It deliberately does not try to recover or check that
+// path -- only that the surrounding, fixed template text matches exactly.
+func isLegacyCliShimContent(content string) bool {
+	for _, pattern := range legacyShimPatterns {
+		if pattern.MatchString(content) {
+			return true
+		}
+	}
+	return false
+}
+
+// isOwnedCliShimFile reports whether the file at path is one this tool
+// created -- either a current shim (carries cliShimMarker) or a shim from
+// before the marker existed (matches a legacy template exactly). A missing,
+// unreadable, or merely similar-looking foreign file is never "owned".
+func isOwnedCliShimFile(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	content := string(data)
+
+	markerScanWindow := content
+	if len(markerScanWindow) > 4096 {
+		markerScanWindow = markerScanWindow[:4096]
+	}
+	if strings.Contains(markerScanWindow, cliShimMarker) {
+		return true
+	}
+
+	return isLegacyCliShimContent(content)
+}
+
 // checkCliAliasSafeToClaim decides whether cmdName is safe for Global CLI
 // Integration to create or overwrite as a global alias. It rejects:
 //  1. anything on the reserved system-command list, regardless of whether
 //     it currently resolves on this machine;
 //  2. any name that already resolves via exec.LookPath to a file that
-//     isn't one this tool created (no shim marker);
+//     isn't one this tool created (current or legacy shim);
 //  3. any of the concrete install-directory paths the caller is about to
 //     write to that already exist and aren't one this tool created.
 //
@@ -159,7 +234,7 @@ func checkCliAliasSafeToClaim(cmdName string, candidatePaths []string) error {
 	}
 
 	if resolved, err := exec.LookPath(cmdName); err == nil {
-		if !fileHasCliShimMarker(resolved) {
+		if !isOwnedCliShimFile(resolved) {
 			return fmt.Errorf("a command named %q already exists on PATH (%s) and was not created by Switcher Suite Wizard; choose a different alias", cmdName, resolved)
 		}
 	}
@@ -172,7 +247,7 @@ func checkCliAliasSafeToClaim(cmdName string, candidatePaths []string) error {
 		if info.IsDir() {
 			return fmt.Errorf("%q already exists as a directory, not a file; choose a different alias", p)
 		}
-		if !fileHasCliShimMarker(p) {
+		if !isOwnedCliShimFile(p) {
 			return fmt.Errorf("%q already exists and was not created by Switcher Suite Wizard; choose a different alias or remove it manually first", p)
 		}
 	}
