@@ -31,7 +31,7 @@ NC='\033[0m'
 # Display Helpers
 # ------------------------------------------------------------------------------
 print_line() {
-    printf "${CYAN}==============================================================================${NC}\n"
+    printf '%s==============================================================================%s\n' "$CYAN" "$NC"
 }
 
 info() {
@@ -149,15 +149,15 @@ echo -e "${NC}"
 if [[ "$MODE" == "-h" || "$MODE" == "--help" || "$MODE" == "help" ]]; then
     printf "\n"
     print_line
-    printf "${BOLD}${CYAN}                    SWITCHER SUITE WIZARD — BUILD SYSTEM${NC}\n"
+    printf '%s%s                    SWITCHER SUITE WIZARD — BUILD SYSTEM%s\n' "$BOLD" "$CYAN" "$NC"
     print_line
     printf "\n"
-    printf "${BOLD}Usage:${NC}\n"
+    printf '%sUsage:%s\n' "$BOLD" "$NC"
     printf "  ./autorun.sh            Interactive Multi-OS selector, build, and launch\n"
     printf "  ./autorun.sh -f         Force rebuild with build/test cache cleanup\n"
     printf "  ./autorun.sh --hard     Full cache purge and clean rebuild\n"
     printf "  ./autorun.sh --help     Display this help screen\n\n"
-    printf "${BOLD}Features:${NC}\n"
+    printf '%sFeatures:%s\n' "$BOLD" "$NC"
     printf "  => Multi-OS Target Wrapper: Build natively or cross-compile on demand.\n"
     printf "  => Offline-Resilient: Compiles directly via vendor directory if offline.\n"
     printf "  => Zero-Latency Global CLI: 'switcher-wizard' bypasses this wrapper completely.\n\n"
@@ -347,7 +347,7 @@ HOST_UNAME="$(uname -s)"
 
 if [[ "$TARGET_OS" == "linux" && "$HOST_UNAME" == "Linux" ]]; then
     step "LAUNCHING SWITCHER SUITE"
-    printf "${DIM}Executing with Root Privileges...${NC}\n\n"
+    printf '%sExecuting with Root Privileges...%s\n\n' "$DIM" "$NC"
     if [[ "$(id -u)" -eq 0 ]]; then
         "./$BINARY_NAME"
     else
@@ -357,7 +357,7 @@ if [[ "$TARGET_OS" == "linux" && "$HOST_UNAME" == "Linux" ]]; then
     success "Switcher Suite closed. Returned safely to your terminal."
 elif [[ "$TARGET_OS" == "darwin" && "$HOST_UNAME" == "Darwin" ]]; then
     step "LAUNCHING SWITCHER SUITE"
-    printf "${DIM}Executing with Root Privileges...${NC}\n\n"
+    printf '%sExecuting with Root Privileges...%s\n\n' "$DIM" "$NC"
     if [[ "$(id -u)" -eq 0 ]]; then
         "./$BINARY_NAME"
     else
@@ -368,7 +368,7 @@ elif [[ "$TARGET_OS" == "darwin" && "$HOST_UNAME" == "Darwin" ]]; then
 else
     printf "\n"
     print_line
-    printf "${BOLD}${GREEN}[✓] CROSS-COMPILATION COMPLETE!${NC}\n"
+    printf '%s%s[✓] CROSS-COMPILATION COMPLETE!%s\n' "$BOLD" "$GREEN" "$NC"
     printf "${YELLOW}[i] Standalone executable package generated for '%s'.${NC}\n" "$TARGET_OS"
     printf "${YELLOW}[i] File ready for deployment: %s/%s${NC}\n" "$PROJECT_DIR" "$BINARY_NAME"
     print_line
