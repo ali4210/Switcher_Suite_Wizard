@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"testing"
 )
@@ -88,3 +89,77 @@ func TestSetSystemProxyPipeline_Darwin(t *testing.T) {
 // getNetworkInterfaces/getDarwinNetworkService read real interface state.
 // Per the project's safety rules, none of those are exercised here --
 // only the pure endpoint-building logic above is.
+
+// ---------------------------------------------------------------------------
+// SSH Server -- macOS status-output parsers. Each is exercised against a
+// realistic sample systemsetup/launchctl/sshd_config/lsof output string.
+// Nothing here invokes systemsetup, launchctl, or lsof for real.
+// ---------------------------------------------------------------------------
+
+func TestParseDarwinRemoteLoginOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"Remote Login: On\n", true},
+		{"Remote Login: Off\n", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseDarwinRemoteLoginOutput(c.output); got != c.want {
+			t.Errorf("parseDarwinRemoteLoginOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestParseDarwinLaunchctlLoadedOutput(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		err    error
+		want   bool
+	}{
+		{"loaded", "system/com.openssh.sshd = {\n\tactive count = 0\n", nil, true},
+		{"not found", "", errors.New("Could not find service \"com.openssh.sshd\" in domain for system"), false},
+		{"empty output even with nil error", "", nil, false},
+	}
+	for _, c := range cases {
+		if got := parseDarwinLaunchctlLoadedOutput(c.output, c.err); got != c.want {
+			t.Errorf("%s: parseDarwinLaunchctlLoadedOutput(%q, %v) = %v, want %v", c.name, c.output, c.err, got, c.want)
+		}
+	}
+}
+
+func TestParseDarwinSSHDConfigPort(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{"default port, explicit directive", "Port 22\nAddressFamily any\n", 22},
+		{"custom non-standard port", "Port 2222\n", 2222},
+		{"no Port line falls back to 22", "AddressFamily any\n", defaultDarwinSSHPort},
+		{"empty config falls back to 22", "", defaultDarwinSSHPort},
+	}
+	for _, c := range cases {
+		if got := parseDarwinSSHDConfigPort(c.output); got != c.want {
+			t.Errorf("%s: parseDarwinSSHDConfigPort(...) = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestParseDarwinListeningOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"sshd 123 root 3u IPv4 0x1 0t0 TCP *:ssh (LISTEN)\n", true},
+		{"", false},
+		{"   \n", false},
+	}
+	for _, c := range cases {
+		if got := parseDarwinListeningOutput(c.output); got != c.want {
+			t.Errorf("parseDarwinListeningOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}

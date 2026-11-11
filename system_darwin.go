@@ -3,11 +3,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -550,4 +552,121 @@ func disableGlobalCLI() (string, error) {
 
 func handleDirectBootCliShell() {
 	// Not required on macOS
+}
+
+// ---------------------------------------------------------------------------
+// SSH Server (Install / Enable) -- macOS
+//
+// sshd ships with macOS, so there is no install step: this is purely an
+// enable/disable of the built-in Remote Login service via systemsetup,
+// with a launchctl-based status fallback for when systemsetup itself
+// needs elevation this process doesn't have. FirewallTool is left empty
+// in the returned status: macOS's application firewall is not a separate
+// exception step for a system service like Remote Login, so the shared
+// menu's firewall-confirmation step never triggers on macOS (see
+// sshServerNeedsFirewallPrompt in system_common.go).
+// ---------------------------------------------------------------------------
+
+const (
+	darwinSSHDConfigPath = "/etc/ssh/sshd_config"
+	defaultDarwinSSHPort = 22
+)
+
+// parseDarwinRemoteLoginOutput reports whether `systemsetup
+// -getremotelogin` output indicates Remote Login is on.
+func parseDarwinRemoteLoginOutput(output string) bool {
+	return strings.Contains(output, "Remote Login: On")
+}
+
+// parseDarwinLaunchctlLoadedOutput reports whether `launchctl print
+// system/com.openssh.sshd` succeeded and actually printed that service's
+// own details, used as a fallback status check when systemsetup itself
+// fails (e.g. needs elevation this process doesn't have).
+func parseDarwinLaunchctlLoadedOutput(output string, err error) bool {
+	return err == nil && strings.Contains(output, "com.openssh.sshd")
+}
+
+// parseDarwinSSHDConfigPort extracts the effective "Port" directive from
+// sshd_config content, defaulting to defaultDarwinSSHPort if no Port line
+// is present or the file could not be read.
+func parseDarwinSSHDConfigPort(configContent string) int {
+	for _, line := range strings.Split(configContent, "\n") {
+		line = strings.TrimSpace(line)
+		fields := strings.Fields(line)
+		if len(fields) == 2 && strings.EqualFold(fields[0], "Port") {
+			if p, err := strconv.Atoi(fields[1]); err == nil {
+				return p
+			}
+		}
+	}
+	return defaultDarwinSSHPort
+}
+
+// parseDarwinListeningOutput reports whether `lsof -nP -iTCP:<port>
+// -sTCP:LISTEN` found a listener (any non-empty output means it did).
+func parseDarwinListeningOutput(output string) bool {
+	return strings.TrimSpace(output) != ""
+}
+
+func getSSHServerStatus() (SSHServerStatus, error) {
+	var status SSHServerStatus
+	status.Installed = true // sshd ships with macOS
+
+	if out, err := runCommand("systemsetup", "-getremotelogin"); err == nil {
+		status.Enabled = parseDarwinRemoteLoginOutput(out)
+		status.Running = status.Enabled
+	} else {
+		lcOut, lcErr := runCommand("launchctl", "print", "system/com.openssh.sshd")
+		loaded := parseDarwinLaunchctlLoadedOutput(lcOut, lcErr)
+		status.Enabled = loaded
+		status.Running = loaded
+		status.Detail = "Could not run systemsetup -getremotelogin (" + err.Error() + "); fell back to launchctl, which can only confirm sshd is loaded, not whether Remote Login's own on/off toggle is set."
+	}
+
+	if status.Running {
+		port := defaultDarwinSSHPort
+		if content, rerr := os.ReadFile(darwinSSHDConfigPath); rerr == nil {
+			port = parseDarwinSSHDConfigPort(string(content))
+		}
+		if out, err := runCommand("lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN"); err == nil && parseDarwinListeningOutput(out) {
+			status.ListeningPort = port
+		}
+	}
+
+	return status, nil
+}
+
+func enableSSHServer() (string, error) {
+	out, err := runCommand("systemsetup", "-setremotelogin", "on")
+	if err != nil {
+		return "", fmt.Errorf(
+			"failed to enable Remote Login via systemsetup: %w\n%s\n"+
+				`Manual steps: System Settings -> General -> Sharing -> turn on "Remote Login". `+
+				"If that is already on but this still fails, check System Settings -> Privacy & Security -> "+
+				"Full Disk Access and grant it to Terminal (or whatever app launched this wizard).",
+			err, out,
+		)
+	}
+
+	status, _ := getSSHServerStatus()
+	if !status.Running {
+		return "", errors.New("systemsetup -setremotelogin on succeeded, but Remote Login does not report as on afterwards -- check System Settings -> General -> Sharing -> Remote Login")
+	}
+	if status.ListeningPort == 0 {
+		return "", errors.New("Remote Login is on, but no listening port could be confirmed via lsof -- check System Settings -> Network -> Firewall")
+	}
+
+	return fmt.Sprintf("SSH server (Remote Login) enabled and listening on port %d.", status.ListeningPort), nil
+}
+
+func disableSSHServer() (string, error) {
+	out, err := runCommand("systemsetup", "-setremotelogin", "off")
+	if err != nil {
+		return "", fmt.Errorf("failed to disable Remote Login via systemsetup: %w\n%s", err, out)
+	}
+	return "SSH server (Remote Login) disabled.", nil
+}
+
+func ensureFirewallAllowsSSH() (string, error) {
+	return "macOS does not require a separate firewall exception for Remote Login -- it is a system service, not an application the firewall would otherwise block.", nil
 }
