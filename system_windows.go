@@ -633,6 +633,7 @@ func handleWindowsNextBootSwitch() {
 			showHeader("SYSTEM REBOOT INITIATED")
 			printBoxRow(" "+FgAmber+Bold+"[!] Restarting Windows system now..."+Reset, "\n")
 			_, _ = runCommand("shutdown.exe", "/r", "/t", "0")
+			restoreNormalScreen()
 			os.Exit(0)
 		} else {
 			showHeader("CONFIGURATION SAVED")

@@ -467,6 +467,7 @@ func handleImmediateSwitch() {
 
 			cmd := exec.Command("bash", "-c", script)
 			_ = cmd.Start()
+			restoreNormalScreen()
 			os.Exit(0)
 
 		case 1:
@@ -495,6 +496,7 @@ func handleImmediateSwitch() {
 
 			cmd := exec.Command("bash", "-c", script)
 			_ = cmd.Start()
+			restoreNormalScreen()
 			os.Exit(0)
 
 		default:
@@ -564,6 +566,7 @@ func handleNextBootSwitch() {
 			showHeader("SYSTEM REBOOT INITIATED")
 			printBoxRow(" "+FgAmber+Bold+"[!] Restarting Linux operating system now..."+Reset, "\n")
 			_, _ = runCommand("systemctl", "reboot")
+			restoreNormalScreen()
 			os.Exit(0)
 		} else {
 			showHeader("CONFIGURATION SAVED")
