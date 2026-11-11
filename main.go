@@ -198,13 +198,14 @@ func autoElevateIfUnprivileged() {
 	}
 }
 
+// getTerminalWidth is locked to the fixed FixedBoxWidth (88) layout: the
+// box-drawing UI assumes a constant width, so the real terminal size is
+// only used to detect an unreadable/unavailable terminal (err, or width
+// <= 0), never to resize the layout to it.
 func getTerminalWidth() int {
 	fd := int(os.Stdout.Fd())
 	width, _, err := term.GetSize(fd)
 	if err != nil || width <= 0 {
-		return FixedBoxWidth
-	}
-	if width < FixedBoxWidth {
 		return FixedBoxWidth
 	}
 	return FixedBoxWidth
