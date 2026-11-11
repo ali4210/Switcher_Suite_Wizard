@@ -93,12 +93,28 @@ const (
 // Locked to compact width
 const FixedBoxWidth = 88
 
+// altScreenManaged is set when the process was launched with
+// --alt-screen-managed (passed as an argv token, not an env var, so it
+// survives a sudo re-exec): the parent (autorun.sh) has already put the
+// terminal into the alternate screen and owns leaving it, so this process
+// must not enter/leave it too -- mode 1049 does not nest. Cursor visibility
+// and color/attribute resets still happen on every exit path regardless.
+var altScreenManaged bool
+
 func initAlternateScreen() {
+	if altScreenManaged {
+		fmt.Print("\033[2J\033[H\033[?25l")
+		return
+	}
 	fmt.Print("\033[?1049h\033[2J\033[H\033[?25l")
 }
 
 func restoreNormalScreen() {
-	fmt.Print("\033[?25h\033[?1049l")
+	if altScreenManaged {
+		fmt.Print(Reset + "\033[?25h")
+		return
+	}
+	fmt.Print(Reset + "\033[?25h\033[?1049l")
 }
 
 // allowedElevationArgs whitelists the only command-line arguments this
@@ -621,13 +637,16 @@ func selectMainMenu() int {
 
 		key, err := reader.ReadByte()
 		if err != nil {
-			continue
+			// stdin closed (EOF, no controlling TTY, etc.) -- treat as quit
+			// instead of busy-looping forever on a ReadByte that will keep
+			// returning the same error.
+			return 8
 		}
 
 		switch key {
 		case '\r', '\n':
 			return selected
-		case 'q', 'Q':
+		case 'q', 'Q', 3:
 			return 8
 		case 27:
 			next1, err1 := reader.ReadByte()
@@ -705,13 +724,16 @@ func SelectFromOptions(title, prompt string, options []string) int {
 
 		key, err := reader.ReadByte()
 		if err != nil {
-			continue
+			// stdin closed (EOF, no controlling TTY, etc.) -- treat as
+			// cancel instead of busy-looping forever on a ReadByte that
+			// will keep returning the same error.
+			return -1
 		}
 
 		switch key {
 		case '\r', '\n':
 			return selected
-		case 'q', 'Q':
+		case 'q', 'Q', 3:
 			return -1
 		case 27:
 			next1, err1 := reader.ReadByte()
@@ -1709,6 +1731,13 @@ func main() {
 	}
 	autoElevateIfUnprivileged()
 
+	for _, a := range os.Args[1:] {
+		if a == "--alt-screen-managed" {
+			altScreenManaged = true
+			break
+		}
+	}
+
 	// Direct OS-Agnostic Boot CLI-Shell Router
 	if len(os.Args) > 1 && os.Args[1] == "--cli-shell" {
 		handleDirectBootCliShell()
@@ -1718,7 +1747,7 @@ func main() {
 	defer restoreNormalScreen()
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		<-sigChan
 		restoreRawModeIfActive()
