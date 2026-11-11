@@ -141,3 +141,155 @@ func TestSetSystemProxyPipeline_Windows(t *testing.T) {
 // out to netsh/powershell with no injectable seam, and getNetworkInterfaces
 // reads real interface state. Per the project's safety rules, none of
 // those are exercised here -- only the pure builders above are.
+
+// ---------------------------------------------------------------------------
+// SSH Server -- Windows pure script builders and status-output parsers.
+// Every script builder returns a fixed literal (confirmed by exact-match
+// assertions below); every parser is exercised against realistic sample
+// PowerShell output strings. Nothing here invokes powershell.exe or
+// touches a real service/capability/firewall rule.
+// ---------------------------------------------------------------------------
+
+func TestWindowsSSHScriptBuildersAreFixedLiterals(t *testing.T) {
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"capability check", buildWindowsSSHCapabilityCheckScript(), `(Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0).State`},
+		{"capability install", buildWindowsSSHCapabilityInstallScript(), `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`},
+		{"set service automatic", buildWindowsSetServiceAutomaticScript(), `Set-Service -Name sshd -StartupType Automatic`},
+		{"start service", buildWindowsStartServiceScript(), `Start-Service -Name sshd`},
+		{"stop service", buildWindowsStopServiceScript(), `Stop-Service -Name sshd -ErrorAction SilentlyContinue`},
+		{"disable service", buildWindowsDisableServiceScript(), `Set-Service -Name sshd -StartupType Disabled`},
+		{"service status query", buildWindowsServiceStatusScript(), `(Get-Service -Name sshd -ErrorAction SilentlyContinue).Status`},
+		{"service start-type query", buildWindowsServiceStartTypeScript(), `(Get-Service -Name sshd -ErrorAction SilentlyContinue).StartType`},
+		{"firewall rule exists", buildWindowsFirewallRuleExistsScript(), `if (Get-NetFirewallRule -Name OpenSSH-Server-In-TCP -ErrorAction SilentlyContinue) { "True" } else { "False" }`},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestBuildWindowsFirewallRuleCreateScript(t *testing.T) {
+	script := buildWindowsFirewallRuleCreateScript()
+	for _, want := range []string{
+		"-Name OpenSSH-Server-In-TCP",
+		"-Direction Inbound",
+		"-Protocol TCP",
+		"-Action Allow",
+		"-LocalPort 22",
+		"-Profile Private,Domain",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("buildWindowsFirewallRuleCreateScript() missing %q in:\n%s", want, script)
+		}
+	}
+	// Never Public -- the task explicitly forbids opening the firewall
+	// rule to all profiles.
+	if strings.Contains(script, "Public") {
+		t.Errorf("buildWindowsFirewallRuleCreateScript() must never include the Public profile:\n%s", script)
+	}
+}
+
+func TestBuildWindowsListeningPortCheckScript(t *testing.T) {
+	cases := []struct {
+		port int
+		want string
+	}{
+		{22, `if (Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue) { "True" } else { "False" }`},
+		{2222, `if (Get-NetTCPConnection -LocalPort 2222 -State Listen -ErrorAction SilentlyContinue) { "True" } else { "False" }`},
+	}
+	for _, c := range cases {
+		if got := buildWindowsListeningPortCheckScript(c.port); got != c.want {
+			t.Errorf("buildWindowsListeningPortCheckScript(%d) = %q, want %q", c.port, got, c.want)
+		}
+	}
+}
+
+func TestParseWindowsCapabilityOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"Installed\n", true},
+		{"NotPresent\n", false},
+		{"Staged\n", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseWindowsCapabilityOutput(c.output); got != c.want {
+			t.Errorf("parseWindowsCapabilityOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestParseWindowsServiceStatusOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"Running\n", true},
+		{"Stopped\n", false},
+		{"StartPending\n", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseWindowsServiceStatusOutput(c.output); got != c.want {
+			t.Errorf("parseWindowsServiceStatusOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestParseWindowsServiceStartTypeOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"Automatic\n", true},
+		{"Manual\n", false},
+		{"Disabled\n", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseWindowsServiceStartTypeOutput(c.output); got != c.want {
+			t.Errorf("parseWindowsServiceStartTypeOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestParseWindowsBoolOutput(t *testing.T) {
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"True\n", true},
+		{"False\n", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := parseWindowsBoolOutput(c.output); got != c.want {
+			t.Errorf("parseWindowsBoolOutput(%q) = %v, want %v", c.output, got, c.want)
+		}
+	}
+}
+
+func TestParseWindowsSSHDConfigPort(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{"default port, explicit directive", "Port 22\nAddressFamily any\n", 22},
+		{"custom non-standard port", "Port 2222\n", 2222},
+		{"no Port line falls back to 22", "AddressFamily any\n", defaultWindowsSSHPort},
+		{"empty config falls back to 22", "", defaultWindowsSSHPort},
+	}
+	for _, c := range cases {
+		if got := parseWindowsSSHDConfigPort(c.output); got != c.want {
+			t.Errorf("%s: parseWindowsSSHDConfigPort(...) = %d, want %d", c.name, got, c.want)
+		}
+	}
+}

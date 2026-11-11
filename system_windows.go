@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -852,4 +853,219 @@ func runNetworkTroubleshooter() []DiagnosticStep {
 
 func handleDirectBootCliShell() {
 	runWindowsInteractiveCLIShell()
+}
+
+// ---------------------------------------------------------------------------
+// SSH Server (Install / Enable) -- Windows
+//
+// Every PowerShell script run here is a fixed literal with zero
+// interpolated/user-supplied string data (this feature takes no free-form
+// input at all, only confirmations) -- the one exception,
+// buildWindowsListeningPortCheckScript, interpolates a strictly-typed int
+// that was itself parsed from sshd_config via strconv.Atoi, never a raw
+// string, so there is nothing to inject. Every script is invoked as a
+// single argv element passed to `powershell -NoProfile -NonInteractive
+// -Command <script>`, never built by concatenating untrusted data into a
+// shell command line.
+// ---------------------------------------------------------------------------
+
+const (
+	windowsSSHCapabilityName = "OpenSSH.Server~~~~0.0.1.0"
+	windowsSSHServiceName    = "sshd"
+	windowsSSHFirewallRule   = "OpenSSH-Server-In-TCP"
+	windowsSSHDConfigPath    = `C:\ProgramData\ssh\sshd_config`
+	defaultWindowsSSHPort    = 22
+)
+
+func runWindowsPowerShell(script string) (string, error) {
+	return runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+}
+
+func buildWindowsSSHCapabilityCheckScript() string {
+	return `(Get-WindowsCapability -Online -Name ` + windowsSSHCapabilityName + `).State`
+}
+
+func buildWindowsSSHCapabilityInstallScript() string {
+	return `Add-WindowsCapability -Online -Name ` + windowsSSHCapabilityName
+}
+
+func buildWindowsSetServiceAutomaticScript() string {
+	return `Set-Service -Name ` + windowsSSHServiceName + ` -StartupType Automatic`
+}
+
+func buildWindowsStartServiceScript() string {
+	return `Start-Service -Name ` + windowsSSHServiceName
+}
+
+func buildWindowsStopServiceScript() string {
+	return `Stop-Service -Name ` + windowsSSHServiceName + ` -ErrorAction SilentlyContinue`
+}
+
+func buildWindowsDisableServiceScript() string {
+	return `Set-Service -Name ` + windowsSSHServiceName + ` -StartupType Disabled`
+}
+
+func buildWindowsServiceStatusScript() string {
+	return `(Get-Service -Name ` + windowsSSHServiceName + ` -ErrorAction SilentlyContinue).Status`
+}
+
+func buildWindowsServiceStartTypeScript() string {
+	return `(Get-Service -Name ` + windowsSSHServiceName + ` -ErrorAction SilentlyContinue).StartType`
+}
+
+func buildWindowsFirewallEnabledScript() string {
+	return `if ((Get-NetFirewallProfile -Profile Private).Enabled -eq $true -or (Get-NetFirewallProfile -Profile Domain).Enabled -eq $true) { "True" } else { "False" }`
+}
+
+func buildWindowsFirewallRuleExistsScript() string {
+	return `if (Get-NetFirewallRule -Name ` + windowsSSHFirewallRule + ` -ErrorAction SilentlyContinue) { "True" } else { "False" }`
+}
+
+func buildWindowsFirewallRuleCreateScript() string {
+	return `New-NetFirewallRule -Name ` + windowsSSHFirewallRule +
+		` -DisplayName "OpenSSH Server (sshd)" -Enabled True -Direction Inbound` +
+		` -Protocol TCP -Action Allow -LocalPort 22 -Profile Private,Domain`
+}
+
+// buildWindowsListeningPortCheckScript takes a strictly-typed int (never a
+// raw string -- callers only ever pass a value already parsed via
+// strconv.Atoi), so there is no injection surface despite the
+// interpolation.
+func buildWindowsListeningPortCheckScript(port int) string {
+	return fmt.Sprintf(`if (Get-NetTCPConnection -LocalPort %d -State Listen -ErrorAction SilentlyContinue) { "True" } else { "False" }`, port)
+}
+
+// parseWindowsCapabilityOutput reports whether `Get-WindowsCapability`'s
+// .State property output is "Installed" (vs. "NotPresent" or any other
+// value).
+func parseWindowsCapabilityOutput(output string) bool {
+	return strings.TrimSpace(output) == "Installed"
+}
+
+// parseWindowsServiceStatusOutput reports whether a Get-Service .Status
+// property output is "Running".
+func parseWindowsServiceStatusOutput(output string) bool {
+	return strings.TrimSpace(output) == "Running"
+}
+
+// parseWindowsServiceStartTypeOutput reports whether a Get-Service
+// .StartType property output is "Automatic".
+func parseWindowsServiceStartTypeOutput(output string) bool {
+	return strings.TrimSpace(output) == "Automatic"
+}
+
+// parseWindowsBoolOutput parses the "True"/"False" text this file's own
+// `if (...) { "True" } else { "False" }`-style scripts always print.
+func parseWindowsBoolOutput(output string) bool {
+	return strings.TrimSpace(output) == "True"
+}
+
+// parseWindowsSSHDConfigPort extracts the effective "Port" directive from
+// sshd_config content, defaulting to OpenSSH's own documented default
+// (defaultWindowsSSHPort) if no Port line is present or the file could
+// not be read.
+func parseWindowsSSHDConfigPort(configContent string) int {
+	for _, line := range strings.Split(configContent, "\n") {
+		line = strings.TrimSpace(line)
+		fields := strings.Fields(line)
+		if len(fields) == 2 && strings.EqualFold(fields[0], "Port") {
+			if p, err := strconv.Atoi(fields[1]); err == nil {
+				return p
+			}
+		}
+	}
+	return defaultWindowsSSHPort
+}
+
+func getSSHServerStatus() (SSHServerStatus, error) {
+	var status SSHServerStatus
+	status.ServiceName = windowsSSHServiceName
+
+	if out, err := runWindowsPowerShell(buildWindowsSSHCapabilityCheckScript()); err == nil {
+		status.Installed = parseWindowsCapabilityOutput(out)
+	}
+
+	if status.Installed {
+		if out, err := runWindowsPowerShell(buildWindowsServiceStatusScript()); err == nil {
+			status.Running = parseWindowsServiceStatusOutput(out)
+		}
+		if out, err := runWindowsPowerShell(buildWindowsServiceStartTypeScript()); err == nil {
+			status.Enabled = parseWindowsServiceStartTypeOutput(out)
+		}
+
+		port := defaultWindowsSSHPort
+		if content, err := os.ReadFile(windowsSSHDConfigPath); err == nil {
+			port = parseWindowsSSHDConfigPort(string(content))
+		} else {
+			status.Detail = "Could not read " + windowsSSHDConfigPath + " to confirm the configured port; assuming the OpenSSH default of 22."
+		}
+		if out, err := runWindowsPowerShell(buildWindowsListeningPortCheckScript(port)); err == nil && parseWindowsBoolOutput(out) {
+			status.ListeningPort = port
+		}
+	}
+
+	status.FirewallTool = "Windows Defender Firewall"
+	if out, err := runWindowsPowerShell(buildWindowsFirewallEnabledScript()); err == nil {
+		status.FirewallActive = parseWindowsBoolOutput(out)
+	}
+	if status.FirewallActive {
+		if out, err := runWindowsPowerShell(buildWindowsFirewallRuleExistsScript()); err == nil {
+			status.FirewallAllowsSSH = parseWindowsBoolOutput(out)
+		}
+	}
+
+	return status, nil
+}
+
+func enableSSHServer() (string, error) {
+	capOut, capErr := runWindowsPowerShell(buildWindowsSSHCapabilityCheckScript())
+	if capErr != nil {
+		return "", fmt.Errorf("failed to query the OpenSSH Server Windows capability: %w\n%s", capErr, capOut)
+	}
+
+	if !parseWindowsCapabilityOutput(capOut) {
+		installOut, installErr := runWindowsPowerShell(buildWindowsSSHCapabilityInstallScript())
+		if installErr != nil {
+			return "", fmt.Errorf(
+				"failed to install the OpenSSH Server capability via Windows Update/Features on Demand: %w\n%s\n"+
+					"Manual alternative: Settings -> Apps -> Optional Features -> Add a feature -> OpenSSH Server, "+
+					"or run as Administrator: Add-WindowsCapability -Online -Name %s",
+				installErr, installOut, windowsSSHCapabilityName,
+			)
+		}
+	}
+
+	if out, err := runWindowsPowerShell(buildWindowsSetServiceAutomaticScript()); err != nil {
+		return "", fmt.Errorf("failed to set the %s service to Automatic startup: %w\n%s", windowsSSHServiceName, err, out)
+	}
+	if out, err := runWindowsPowerShell(buildWindowsStartServiceScript()); err != nil {
+		return "", fmt.Errorf("failed to start the %s service: %w\n%s", windowsSSHServiceName, err, out)
+	}
+
+	status, _ := getSSHServerStatus()
+	if !status.Running {
+		return "", fmt.Errorf("%s's StartupType was set and Start-Service was issued, but the service does not report Running -- check `Get-Service %s` and the Windows Event Log", windowsSSHServiceName, windowsSSHServiceName)
+	}
+	if status.ListeningPort == 0 {
+		return "", errors.New("sshd service is running, but no listening port could be confirmed via Get-NetTCPConnection -- check Windows Defender Firewall or a custom sshd_config Port")
+	}
+
+	return fmt.Sprintf("SSH server installed, set to start automatically, and listening on port %d.", status.ListeningPort), nil
+}
+
+func disableSSHServer() (string, error) {
+	if out, err := runWindowsPowerShell(buildWindowsStopServiceScript()); err != nil {
+		return "", fmt.Errorf("failed to stop the %s service: %w\n%s", windowsSSHServiceName, err, out)
+	}
+	if out, err := runWindowsPowerShell(buildWindowsDisableServiceScript()); err != nil {
+		return "", fmt.Errorf("failed to set the %s service to Disabled startup: %w\n%s", windowsSSHServiceName, err, out)
+	}
+	return "SSH server disabled (stopped, and will not start on boot). The OpenSSH Server Windows capability itself was left installed.", nil
+}
+
+func ensureFirewallAllowsSSH() (string, error) {
+	if out, err := runWindowsPowerShell(buildWindowsFirewallRuleCreateScript()); err != nil {
+		return "", fmt.Errorf("failed to create the %s firewall rule: %w\n%s", windowsSSHFirewallRule, err, out)
+	}
+	return fmt.Sprintf("Firewall rule %q created (Private/Domain profiles only).", windowsSSHFirewallRule), nil
 }
