@@ -179,6 +179,28 @@ func getCurrentDNS(iface string) string {
 	return "192.168.0.1 (Router DHCP)"
 }
 
+// linuxVirtualInterfacePrefixes lists common virtual/container-managed
+// adapter name prefixes that don't make sense to offer in this tool's
+// static-IP picker -- mirroring macOS's own filtering
+// (isDarwinVirtualInterface), which Linux previously had no equivalent
+// of, only excluding the loopback device.
+var linuxVirtualInterfacePrefixes = []string{"docker", "veth", "br-", "virbr"}
+
+// isLinuxVirtualInterface reports whether iface is the loopback device
+// or a common virtual/container-managed adapter (Docker, libvirt
+// bridges, veth pairs) this tool's IP picker should not offer.
+func isLinuxVirtualInterface(iface string) bool {
+	if iface == "" || iface == "lo" {
+		return true
+	}
+	for _, prefix := range linuxVirtualInterfacePrefixes {
+		if strings.HasPrefix(iface, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func getNetworkInterfaces() []string {
 	output, err := runCommand("ip", "-o", "link", "show")
 	if err != nil {
@@ -196,7 +218,7 @@ func getNetworkInterfaces() []string {
 		iface := strings.TrimSpace(parts[1])
 		iface = strings.Split(iface, "@")[0]
 
-		if iface == "" || iface == "lo" {
+		if isLinuxVirtualInterface(iface) {
 			continue
 		}
 

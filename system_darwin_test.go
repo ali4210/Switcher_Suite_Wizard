@@ -163,3 +163,29 @@ func TestParseDarwinListeningOutput(t *testing.T) {
 		}
 	}
 }
+
+// TestIsDarwinVirtualInterface exercises the predicate extracted from
+// getNetworkInterfaces' previously-inline filter (N8's own reference
+// implementation that Linux/Windows now mirror).
+func TestIsDarwinVirtualInterface(t *testing.T) {
+	cases := []struct {
+		iface string
+		want  bool
+	}{
+		{"lo0", true},
+		{"", true},
+		{"bridge0", true},
+		{"bridge100", true},
+		{"utun0", true},
+		{"utun3", true},
+		{"llw0", true},
+		{"awdl0", true},
+		{"en0", false},
+		{"en1", false},
+	}
+	for _, c := range cases {
+		if got := isDarwinVirtualInterface(c.iface); got != c.want {
+			t.Errorf("isDarwinVirtualInterface(%q) = %v, want %v", c.iface, got, c.want)
+		}
+	}
+}

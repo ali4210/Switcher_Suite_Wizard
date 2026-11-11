@@ -213,6 +213,37 @@ func parseWinHTTPProxyOutput(output string) string {
 	return ""
 }
 
+// windowsVirtualInterfaceSubstrings lists common virtual-adapter name
+// patterns `netsh interface show interface` can list that don't make
+// sense to offer in this tool's static-IP picker: Hyper-V/WSL virtual
+// switches (vEthernet) and a few of the most common VPN client/loopback
+// adapter names. Necessarily best-effort and non-exhaustive -- VPN
+// vendors name their adapters differently -- mirroring macOS's own
+// filtering (isDarwinVirtualInterface) as closely as Windows's much
+// less standardized adapter naming allows; anything not on this list is
+// still shown, just not filtered.
+var windowsVirtualInterfaceSubstrings = []string{
+	"vEthernet",
+	"TAP-Windows",
+	"Npcap Loopback",
+	"WireGuard",
+}
+
+// isWindowsVirtualInterface reports whether name is the loopback
+// pseudo-interface or a common virtual/VPN adapter this tool's IP
+// picker should not offer.
+func isWindowsVirtualInterface(name string) bool {
+	if strings.EqualFold(name, "Loopback Pseudo-Interface 1") {
+		return true
+	}
+	for _, s := range windowsVirtualInterfaceSubstrings {
+		if strings.Contains(name, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func getNetworkInterfaces() []string {
 	output, err := runCommand(
 		"netsh",
@@ -241,7 +272,7 @@ func getNetworkInterfaces() []string {
 		}
 
 		iface := strings.Join(fields[3:], " ")
-		if strings.EqualFold(iface, "Loopback Pseudo-Interface 1") {
+		if isWindowsVirtualInterface(iface) {
 			continue
 		}
 

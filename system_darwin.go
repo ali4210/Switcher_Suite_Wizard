@@ -114,6 +114,26 @@ func getCurrentDNS(iface string) string {
 	return "192.168.0.1 (Router DHCP)"
 }
 
+// darwinVirtualInterfacePrefixes lists macOS's own virtual-adapter name
+// prefixes that don't make sense to offer in this tool's static-IP
+// picker: Internet Sharing bridges, utun (VPN/tunnel), and the
+// Wi-Fi-Direct-related llw/awdl adapters.
+var darwinVirtualInterfacePrefixes = []string{"bridge", "utun", "llw", "awdl"}
+
+// isDarwinVirtualInterface reports whether iface is the loopback device
+// or one of darwinVirtualInterfacePrefixes' virtual adapters.
+func isDarwinVirtualInterface(iface string) bool {
+	if iface == "" || iface == "lo0" {
+		return true
+	}
+	for _, prefix := range darwinVirtualInterfacePrefixes {
+		if strings.HasPrefix(iface, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func getNetworkInterfaces() []string {
 	output, err := runCommand("ifconfig", "-l")
 	if err != nil {
@@ -122,7 +142,7 @@ func getNetworkInterfaces() []string {
 
 	interfaces := make([]string, 0)
 	for _, iface := range strings.Fields(output) {
-		if iface == "" || iface == "lo0" || strings.HasPrefix(iface, "bridge") || strings.HasPrefix(iface, "utun") || strings.HasPrefix(iface, "llw") || strings.HasPrefix(iface, "awdl") {
+		if isDarwinVirtualInterface(iface) {
 			continue
 		}
 		interfaces = append(interfaces, iface)

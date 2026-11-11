@@ -378,3 +378,29 @@ func TestParseWinHTTPProxyOutput(t *testing.T) {
 		}
 	}
 }
+
+// TestIsWindowsVirtualInterface is the regression test for N8: the
+// Windows interface picker previously excluded only the loopback
+// pseudo-interface, unlike macOS's picker which also excludes its own
+// virtual-adapter prefixes.
+func TestIsWindowsVirtualInterface(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"Loopback Pseudo-Interface 1", true},
+		{"vEthernet (Default Switch)", true},
+		{"vEthernet (WSL)", true},
+		{"TAP-Windows Adapter V9", true},
+		{"Npcap Loopback Adapter", true},
+		{"WireGuard Tunnel", true},
+		{"Ethernet", false},
+		{"Wi-Fi", false},
+		{"Local Area Connection", false},
+	}
+	for _, c := range cases {
+		if got := isWindowsVirtualInterface(c.name); got != c.want {
+			t.Errorf("isWindowsVirtualInterface(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

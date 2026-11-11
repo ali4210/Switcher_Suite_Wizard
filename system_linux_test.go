@@ -677,6 +677,32 @@ func TestParseFirewalldPortsOutput(t *testing.T) {
 // the pure parsing/building/selection logic above is, which is exactly
 // what those five delegate every real decision to.
 
+// TestIsLinuxVirtualInterface is the regression test for N8: the Linux
+// interface picker previously excluded only the loopback device, unlike
+// macOS's picker which also excludes its own virtual-adapter prefixes.
+func TestIsLinuxVirtualInterface(t *testing.T) {
+	cases := []struct {
+		iface string
+		want  bool
+	}{
+		{"lo", true},
+		{"", true},
+		{"docker0", true},
+		{"veth1234abcd", true},
+		{"br-a1b2c3d4e5f6", true},
+		{"virbr0", true},
+		{"eth0", false},
+		{"enp3s0", false},
+		{"wlan0", false},
+		{"bridge0", false}, // "bridge" without the hyphen is a real/different naming convention; must not be excluded
+	}
+	for _, c := range cases {
+		if got := isLinuxVirtualInterface(c.iface); got != c.want {
+			t.Errorf("isLinuxVirtualInterface(%q) = %v, want %v", c.iface, got, c.want)
+		}
+	}
+}
+
 // launchDetached / runDetachedModeSwitch / detectDisplayManager /
 // syncLinuxHostsFile / isSystemdResolvedManaged all either hardcode real
 // system paths (/etc/X11/default-display-manager, /etc/hosts,
