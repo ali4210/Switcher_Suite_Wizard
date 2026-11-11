@@ -10,11 +10,51 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode/utf8"
 
 	"golang.org/x/term"
 )
+
+// rawTermState tracks the currently-active raw terminal mode (if any) so a
+// SIGINT/SIGTERM handler running outside the normal call stack can restore
+// it before exiting, instead of leaving the terminal in raw/no-echo mode.
+var (
+	rawTermMu    sync.Mutex
+	rawTermFd    int
+	rawTermState *term.State
+)
+
+func enterRawMode(fd int) (*term.State, error) {
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, err
+	}
+	rawTermMu.Lock()
+	rawTermFd = fd
+	rawTermState = oldState
+	rawTermMu.Unlock()
+	return oldState, nil
+}
+
+func exitRawMode(fd int, oldState *term.State) {
+	_ = term.Restore(fd, oldState)
+	rawTermMu.Lock()
+	if rawTermState == oldState {
+		rawTermState = nil
+	}
+	rawTermMu.Unlock()
+}
+
+func restoreRawModeIfActive() {
+	rawTermMu.Lock()
+	defer rawTermMu.Unlock()
+	if rawTermState != nil {
+		_ = term.Restore(rawTermFd, rawTermState)
+		rawTermState = nil
+	}
+}
 
 // ANSI Color Theme (Enterprise High-Contrast Production Palette)
 const (
@@ -525,11 +565,11 @@ func confirmAction(message string) bool {
 
 func selectMainMenu() int {
 	fd := int(os.Stdin.Fd())
-	oldState, err := term.MakeRaw(fd)
+	oldState, err := enterRawMode(fd)
 	if err != nil {
 		return selectMainMenuFallback()
 	}
-	defer term.Restore(fd, oldState)
+	defer exitRawMode(fd, oldState)
 
 	selected := 0
 	reader := bufio.NewReader(os.Stdin)
@@ -573,11 +613,11 @@ func SelectFromOptions(title, prompt string, options []string) int {
 	}
 
 	fd := int(os.Stdin.Fd())
-	oldState, err := term.MakeRaw(fd)
+	oldState, err := enterRawMode(fd)
 	if err != nil {
 		return selectFallback(title, prompt, options)
 	}
-	defer term.Restore(fd, oldState)
+	defer exitRawMode(fd, oldState)
 
 	selected := 0
 	reader := bufio.NewReader(os.Stdin)
@@ -1639,6 +1679,7 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
+		restoreRawModeIfActive()
 		restoreNormalScreen()
 		os.Exit(0)
 	}()
