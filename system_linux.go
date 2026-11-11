@@ -608,7 +608,7 @@ echo "[switcher] switch-to-gui complete"
 }
 
 func buildTtySwitchScript(dm string) string {
-	stopCmd := "true"
+	stopCmd := "systemctl isolate multi-user.target"
 	if dm != "" {
 		stopCmd = "systemctl stop " + dm
 	}
