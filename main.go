@@ -542,7 +542,15 @@ func pauseAction() {
 	printBoxSeparator("\n")
 	printBoxRow(" "+FgCyan+"Press [ENTER] to return to the wizard..."+Reset, "\n")
 	printBoxBottom("\n")
-	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+
+	if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
+		// stdin is closed or unreadable (EOF, no controlling TTY, etc.) --
+		// exit cleanly instead of returning into menu loops that would
+		// just spin re-reading the same closed stdin forever.
+		restoreRawModeIfActive()
+		restoreNormalScreen()
+		os.Exit(0)
+	}
 }
 
 func confirmAction(message string) bool {
