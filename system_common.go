@@ -563,20 +563,27 @@ func parseAndValidateProxy(input string) (string, string, error) {
 		return "", "", errors.New("proxy endpoint cannot be blank")
 	}
 
-	parts := strings.Split(input, ":")
-	if len(parts) != 2 {
-		return "", "", errors.New("format must be host:port (e.g. 127.0.0.1:8080 or proxy.company.com:3128)")
+	// net.SplitHostPort (rather than a bare strings.Split on ":") understands
+	// bracketed IPv6 literals like [::1]:8080, and correctly rejects an
+	// unbracketed address with more than one colon as ambiguous.
+	host, port, err := net.SplitHostPort(input)
+	if err != nil {
+		return "", "", errors.New("format must be host:port (e.g. 127.0.0.1:8080, proxy.company.com:3128, or [::1]:8080 for IPv6)")
 	}
 
-	host := strings.TrimSpace(parts[0])
-	port := strings.TrimSpace(parts[1])
+	host = strings.TrimSpace(host)
+	port = strings.TrimSpace(port)
 
 	if host == "" {
 		return "", "", errors.New("proxy host cannot be blank")
 	}
 
-	if !validProxyHostPattern.MatchString(host) {
-		return "", "", errors.New("proxy host may only contain letters, numbers, dots, and hyphens (no quotes, spaces, or shell characters)")
+	// net.ParseIP is a strict, non-regex parser: a string it accepts can only
+	// be a well-formed IPv4/IPv6 literal, never shell/PowerShell metacharacters,
+	// so accepting it here (needed for IPv6, which contains ':' and therefore
+	// never matches validProxyHostPattern) introduces no injection risk.
+	if net.ParseIP(host) == nil && !validProxyHostPattern.MatchString(host) {
+		return "", "", errors.New("proxy host may only contain letters, numbers, dots, and hyphens (no quotes, spaces, or shell characters), or be a valid IPv6 literal")
 	}
 
 	portNum, err := strconv.Atoi(port)

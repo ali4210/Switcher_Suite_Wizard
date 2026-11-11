@@ -94,6 +94,10 @@ func TestParseAndValidateProxy_Valid(t *testing.T) {
 		{" 127.0.0.1:8080 ", "127.0.0.1", "8080"},
 		{"127.0.0.1:1", "127.0.0.1", "1"},
 		{"127.0.0.1:65535", "127.0.0.1", "65535"},
+		{"[::1]:8080", "::1", "8080"},
+		{"[2001:db8::1]:3128", "2001:db8::1", "3128"},
+		{"http://[::1]:8080", "::1", "8080"},
+		{" [::1]:8080 ", "::1", "8080"},
 	}
 	for _, c := range cases {
 		host, port, err := parseAndValidateProxy(c.input)
@@ -135,6 +139,15 @@ func TestParseAndValidateProxy_Invalid(t *testing.T) {
 		"127.0.0.1:abc",
 		"127.0.0.1:-1",
 		"127.0.0.1:99999",
+		"::1:8080", // unbracketed IPv6 is ambiguous -- must be rejected, not guessed at
+		"a:b:c",    // same ambiguity, non-IP
+		"[::1]:0",
+		"[::1]:65536",
+		"[::1]:abc",
+		"[::1; rm -rf /]:8080", // injection attempt disguised as an IPv6 literal
+		"[$(id)::1]:8080",
+		"[`id`::1]:8080",
+		"[::1' ; id ; ']:8080",
 	}
 	for _, in := range invalid {
 		if _, _, err := parseAndValidateProxy(in); err == nil {
