@@ -432,6 +432,98 @@ func showBootModeMenu() {
 	}
 }
 
+const switchLogFile = "/tmp/switcher-switch.log"
+
+// detectDisplayManager identifies the display manager actually configured on
+// this host instead of assuming lightdm/gdm3/sddm are all present. Returns ""
+// if none can be identified, so callers can fall back to graphical.target.
+func detectDisplayManager() string {
+	if data, err := os.ReadFile("/etc/X11/default-display-manager"); err == nil {
+		dm := strings.TrimSpace(string(data))
+		dm = filepath.Base(dm)
+		if dm != "" {
+			if !strings.HasSuffix(dm, ".service") {
+				dm += ".service"
+			}
+			return dm
+		}
+	}
+
+	for _, svc := range []string{"lightdm.service", "gdm.service", "gdm3.service", "sddm.service"} {
+		if out, err := runCommand("systemctl", "list-unit-files", svc); err == nil && strings.Contains(out, svc) {
+			return svc
+		}
+	}
+
+	return ""
+}
+
+// runDetachedModeSwitch launches script so it survives the current session
+// being torn down by the switch itself (e.g. stopping the display manager
+// that owns the invoking session's cgroup). It prefers a transient systemd
+// scope, falling back to setsid, and finally to a plain background process.
+func runDetachedModeSwitch(script string) {
+	if commandExists("systemd-run") {
+		cmd := exec.Command("systemd-run", "--scope", "--collect", "--quiet", "bash", "-c", script)
+		if err := cmd.Start(); err == nil {
+			return
+		}
+	}
+
+	if commandExists("setsid") {
+		cmd := exec.Command("setsid", "bash", "-c", script)
+		if err := cmd.Start(); err == nil {
+			return
+		}
+	}
+
+	cmd := exec.Command("bash", "-c", script)
+	_ = cmd.Start()
+}
+
+func buildGuiSwitchScript(dm string) string {
+	startCmd := "systemctl isolate graphical.target"
+	if dm != "" {
+		startCmd = "systemctl start " + dm
+	}
+
+	return fmt.Sprintf(`{
+echo "=== $(date '+%%Y-%%m-%%d %%H:%%M:%%S') switch-to-gui ==="
+timeout 10 %s || echo "[switcher] display manager start failed or timed out"
+sleep 1
+chvt 7 || chvt 2 || echo "[switcher] chvt failed"
+echo "[switcher] switch-to-gui complete"
+} >>%s 2>&1
+`, startCmd, switchLogFile)
+}
+
+func buildTtySwitchScript(dm string) string {
+	stopCmd := "true"
+	if dm != "" {
+		stopCmd = "systemctl stop " + dm
+	}
+
+	return fmt.Sprintf(`{
+echo "=== $(date '+%%Y-%%m-%%d %%H:%%M:%%S') switch-to-tty ==="
+systemctl enable --now getty@tty1.service || echo "[switcher] failed to enable getty@tty1"
+systemctl restart getty@tty1.service || echo "[switcher] failed to restart getty@tty1"
+systemctl start getty@tty2.service || true
+timeout 10 %s || echo "[switcher] display manager stop failed or timed out"
+chvt 1 || openvt -c 1 -- /bin/login || echo "[switcher] chvt failed"
+echo "[switcher] switch-to-tty complete"
+} >>%s 2>&1
+`, stopCmd, switchLogFile)
+}
+
+func printSwitchRecoveryHint(target string) {
+	printBoxBlankRow("\n")
+	printBoxRow(" "+FgCyan+"[i] Switch to "+target+" dispatched in the background."+Reset, "\n")
+	printBoxRow("     If the screen does not change within ~10 seconds:", "\n")
+	printBoxRow("     - Try Ctrl+Alt+F1 through F7 to find the active VT manually.", "\n")
+	printBoxRow("     - Check "+FgBright+switchLogFile+Reset+" for what the switch actually did.", "\n")
+	printBoxRow("     - Re-run this wizard and choose the mode again if needed.", "\n")
+}
+
 func handleImmediateSwitch() {
 	for {
 		choice := SelectFromOptions(
@@ -447,7 +539,13 @@ func handleImmediateSwitch() {
 		switch choice {
 		case 0:
 			showHeader("CONFIRM SWITCH TO GUI")
-			printBoxRow(" "+FgCyan+"[i] Activating graphical desktop (LightDM/GDM/SDDM)..."+Reset, "\n")
+			dm := detectDisplayManager()
+			if dm == "" {
+				printBoxRow(" "+FgAmber+"[!] No known display manager (lightdm/gdm/gdm3/sddm) was detected."+Reset, "\n")
+				printBoxRow("     Falling back to 'systemctl isolate graphical.target'.", "\n")
+			} else {
+				printBoxRow(" "+FgCyan+"[i] Activating graphical desktop ("+dm+")..."+Reset, "\n")
+			}
 			printBoxBlankRow("\n")
 
 			if !confirmAction("Start graphical desktop environment now?") {
@@ -457,16 +555,8 @@ func handleImmediateSwitch() {
 				continue
 			}
 
-			script := `
-				(
-					systemctl start lightdm.service >/dev/null 2>&1 || systemctl start gdm3.service >/dev/null 2>&1 || systemctl start sddm.service >/dev/null 2>&1 || systemctl isolate graphical.target >/dev/null 2>&1
-					sleep 1
-					chvt 7 || chvt 2
-				) >/dev/null 2>&1 &
-			`
-
-			cmd := exec.Command("bash", "-c", script)
-			_ = cmd.Start()
+			runDetachedModeSwitch(buildGuiSwitchScript(dm))
+			printSwitchRecoveryHint("GUI desktop")
 			restoreNormalScreen()
 			os.Exit(0)
 
@@ -483,19 +573,9 @@ func handleImmediateSwitch() {
 				continue
 			}
 
-			script := `
-				(
-					systemctl enable --now getty@tty1.service >/dev/null 2>&1
-					systemctl restart getty@tty1.service >/dev/null 2>&1
-					systemctl start getty@tty2.service >/dev/null 2>&1
-					systemctl stop lightdm.service >/dev/null 2>&1 || systemctl stop gdm3.service >/dev/null 2>&1 || systemctl stop sddm.service >/dev/null 2>&1
-					sleep 0.5
-					chvt 1 || openvt -c 1 -- /bin/login
-				) >/dev/null 2>&1 &
-			`
-
-			cmd := exec.Command("bash", "-c", script)
-			_ = cmd.Start()
+			dm := detectDisplayManager()
+			runDetachedModeSwitch(buildTtySwitchScript(dm))
+			printSwitchRecoveryHint("TTY / CLI console")
 			restoreNormalScreen()
 			os.Exit(0)
 
