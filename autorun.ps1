@@ -133,9 +133,24 @@ function Display-WrapperMenu {
             $global:BinaryName = "Switcher_Suite_Wizard_macOS"
         }
         "4" {
-            $global:TargetOS   = "windows"
-            $global:TargetArch = "amd64"
-            $global:BinaryName = "Switcher_Suite_Wizard.exe"
+            # $IsLinux/$IsMacOS/$IsWindows only exist on PowerShell
+            # 6+/Core (which runs cross-platform); on Windows PowerShell
+            # 5.1 they are simply undefined ($null, which is falsy here)
+            # -- and 5.1 only ever runs on Windows anyway, so falling
+            # through to the Windows branch below is correct either way.
+            if ($IsLinux) {
+                $global:TargetOS   = "linux"
+                $global:TargetArch = "amd64"
+                $global:BinaryName = "Switcher_Suite_Wizard"
+            } elseif ($IsMacOS) {
+                $global:TargetOS   = "darwin"
+                $global:TargetArch = "amd64"
+                $global:BinaryName = "Switcher_Suite_Wizard_macOS"
+            } else {
+                $global:TargetOS   = "windows"
+                $global:TargetArch = "amd64"
+                $global:BinaryName = "Switcher_Suite_Wizard.exe"
+            }
         }
         "Q" {
             Write-Host "`n${YELLOW}=> Operation cancelled by user.${NC}"
