@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -181,8 +182,17 @@ func autoElevateIfUnprivileged() {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
-		if err := cmd.Run(); err == nil {
+		err := cmd.Run()
+		if err == nil {
 			os.Exit(0)
+		}
+		// Propagate the elevated child's real exit code when it actually ran
+		// and exited non-zero for its own reasons, rather than collapsing
+		// that case to the same exit(1) used when sudo itself failed to
+		// start (e.g. not installed, or the user declined the prompt).
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
 		}
 		os.Exit(1)
 	}
