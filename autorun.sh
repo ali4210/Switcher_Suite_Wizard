@@ -411,6 +411,11 @@ success "Binary ready: $PROJECT_DIR/$BINARY_NAME"
 HOST_UNAME="$(uname -s)"
 
 LAUNCH_ARGS=()
+# Expanded below as "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}", not a bare
+# "${LAUNCH_ARGS[@]}": under `set -u`, bash < 4.4 (this is bash 3.2 on
+# macOS) treats expanding an empty array as an unbound-variable error.
+# The ${arr[@]+...} form sidesteps that on every bash version this
+# script needs to run on.
 if [[ "$ALT_SCREEN_ACTIVE" -eq 1 ]]; then
     # We already own the alternate screen; tell the binary not to also
     # enter/leave it itself (mode 1049 does not nest). Passed as an argv
@@ -422,9 +427,9 @@ if [[ "$TARGET_OS" == "linux" && "$HOST_UNAME" == "Linux" ]]; then
     step "LAUNCHING SWITCHER SUITE"
     printf '%sExecuting with Root Privileges...%s\n\n' "$DIM" "$NC"
     if [[ "$(id -u)" -eq 0 ]]; then
-        "./$BINARY_NAME" "${LAUNCH_ARGS[@]}"
+        "./$BINARY_NAME" "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}"
     else
-        sudo "./$BINARY_NAME" "${LAUNCH_ARGS[@]}"
+        sudo "./$BINARY_NAME" "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}"
     fi
     printf "\n"
     success "Switcher Suite closed. Returned safely to your terminal."
@@ -432,9 +437,9 @@ elif [[ "$TARGET_OS" == "darwin" && "$HOST_UNAME" == "Darwin" ]]; then
     step "LAUNCHING SWITCHER SUITE"
     printf '%sExecuting with Root Privileges...%s\n\n' "$DIM" "$NC"
     if [[ "$(id -u)" -eq 0 ]]; then
-        "./$BINARY_NAME" "${LAUNCH_ARGS[@]}"
+        "./$BINARY_NAME" "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}"
     else
-        sudo "./$BINARY_NAME" "${LAUNCH_ARGS[@]}"
+        sudo "./$BINARY_NAME" "${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"}"
     fi
     printf "\n"
     success "Switcher Suite closed. Returned safely to your terminal."
