@@ -376,21 +376,34 @@ func setDNS(iface string, servers []string, automatic bool) string {
 		return commandError("Failed to update DNS configuration", output, err)
 	}
 
-	_ = reactivateNetworkManagerConnection(connection)
+	activationResult := reactivateNetworkManagerConnection(connection)
 
+	var resolvedWarning string
 	if !automatic && len(servers) > 0 {
 		if isSystemdResolvedManaged() {
-			_, _ = applyResolvedDNS(iface, servers)
+			if out, rerr := applyResolvedDNS(iface, servers); rerr != nil {
+				resolvedWarning = "\n\n" + commandError(
+					"DNS was saved in NetworkManager, but resolvectl failed to apply it to the live resolver",
+					out,
+					rerr,
+				)
+			}
 		} else {
 			var buf strings.Builder
 			for _, s := range servers {
 				buf.WriteString("nameserver " + s + "\n")
 			}
-			_ = os.WriteFile("/etc/resolv.conf", []byte(buf.String()), 0644)
+			if werr := os.WriteFile("/etc/resolv.conf", []byte(buf.String()), 0644); werr != nil {
+				resolvedWarning = "\n\n" + commandError(
+					"DNS was saved in NetworkManager, but writing /etc/resolv.conf failed",
+					"",
+					werr,
+				)
+			}
 		}
 	}
 
-	return Green + "[✓] " + successMessage + NC
+	return Green + "[✓] " + successMessage + NC + "\n\n" + activationResult + resolvedWarning
 }
 
 func getCurrentProxy() string {
