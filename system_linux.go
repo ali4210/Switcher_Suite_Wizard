@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func execCommand(name string, args ...string) *exec.Cmd {
@@ -26,14 +27,93 @@ func setSystemHostname(newName string) (string, error) {
 	if commandExists("hostnamectl") {
 		_, _ = runCommand("hostnamectl", "set-hostname", newName)
 	}
-	_ = os.WriteFile("/etc/hostname", []byte(newName+"\n"), 0644)
-	_ = exec.Command("hostname", newName).Run()
+	if err := os.WriteFile("/etc/hostname", []byte(newName+"\n"), 0644); err != nil {
+		return commandError("Failed to write /etc/hostname", "", err), err
+	}
+	if err := exec.Command("hostname", newName).Run(); err != nil {
+		return commandError("Failed to apply hostname to the running kernel", "", err), err
+	}
 
-	// Automatically patch /etc/hosts with new hostname
-	hostsData := fmt.Sprintf("127.0.0.1\tlocalhost %s\n::1\t\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n", newName, newName)
-	_ = os.WriteFile("/etc/hosts", []byte(hostsData), 0644)
+	// Merge the new hostname into /etc/hosts instead of overwriting it
+	syncLinuxHostsFile(newName)
 
 	return fmt.Sprintf("Hostname permanently set to '%s' (updated /etc/hostname, /etc/hosts, and live kernel).", newName), nil
+}
+
+// backupHostsFile preserves the pre-change contents of /etc/hosts so a bad
+// merge can be undone manually.
+func backupHostsFile() {
+	data, err := os.ReadFile("/etc/hosts")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile("/etc/hosts.switcher.bak", data, 0644)
+}
+
+// syncLinuxHostsFile backs up /etc/hosts, then merges the given hostname
+// into its Debian-style 127.0.1.1 line instead of truncating the whole file
+// (which previously destroyed any custom entries such as Docker or local
+// dev domains). The localhost/::1 lines are preserved as-is.
+func syncLinuxHostsFile(hostname string) {
+	backupHostsFile()
+
+	data, err := os.ReadFile("/etc/hosts")
+	if err != nil {
+		hostsData := fmt.Sprintf("127.0.0.1\tlocalhost\n::1\t\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n", hostname)
+		_ = os.WriteFile("/etc/hosts", []byte(hostsData), 0644)
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var newLines []string
+	wroteHostnameLine := false
+	hasLocalhostLine := false
+	hasIPv6LocalhostLine := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "127.0.1.1"):
+			newLines = append(newLines, "127.0.1.1\t"+hostname)
+			wroteHostnameLine = true
+		case strings.HasPrefix(trimmed, "127.0.0.1"):
+			hasLocalhostLine = true
+			newLines = append(newLines, line)
+		case strings.HasPrefix(trimmed, "::1"):
+			hasIPv6LocalhostLine = true
+			newLines = append(newLines, line)
+		default:
+			newLines = append(newLines, line)
+		}
+	}
+
+	if !hasLocalhostLine {
+		newLines = append([]string{"127.0.0.1\tlocalhost"}, newLines...)
+	}
+	if !hasIPv6LocalhostLine {
+		newLines = append(newLines, "::1\t\tlocalhost ip6-localhost ip6-loopback")
+	}
+	if !wroteHostnameLine {
+		newLines = append(newLines, "127.0.1.1\t"+hostname)
+	}
+
+	_ = os.WriteFile("/etc/hosts", []byte(strings.Join(newLines, "\n")), 0644)
+}
+
+// isSystemdResolvedManaged reports whether /etc/resolv.conf is owned by
+// systemd-resolved, in which case writing it directly is silently reverted
+// and resolvectl must be used instead.
+func isSystemdResolvedManaged() bool {
+	if target, err := os.Readlink("/etc/resolv.conf"); err == nil && strings.Contains(target, "systemd") {
+		return true
+	}
+	_, err := os.Stat("/run/systemd/resolve/resolv.conf")
+	return err == nil
+}
+
+func applyResolvedDNS(iface string, servers []string) (string, error) {
+	args := append([]string{"dns", iface}, servers...)
+	return runCommand("resolvectl", args...)
 }
 
 func getInterfaceIPAddresses(iface string) []string {
@@ -299,11 +379,15 @@ func setDNS(iface string, servers []string, automatic bool) string {
 	_ = reactivateNetworkManagerConnection(connection)
 
 	if !automatic && len(servers) > 0 {
-		var buf strings.Builder
-		for _, s := range servers {
-			buf.WriteString("nameserver " + s + "\n")
+		if isSystemdResolvedManaged() {
+			_, _ = applyResolvedDNS(iface, servers)
+		} else {
+			var buf strings.Builder
+			for _, s := range servers {
+				buf.WriteString("nameserver " + s + "\n")
+			}
+			_ = os.WriteFile("/etc/resolv.conf", []byte(buf.String()), 0644)
 		}
-		_ = os.WriteFile("/etc/resolv.conf", []byte(buf.String()), 0644)
 	}
 
 	return Green + "[✓] " + successMessage + NC
@@ -367,7 +451,9 @@ func setSystemProxy(host, port string) string {
 
 	// 2. Global Linux Environment Configuration
 	envContent := fmt.Sprintf("http_proxy=\"http://%s:%s/\"\nhttps_proxy=\"http://%s:%s/\"\nall_proxy=\"socks5://%s:%s/\"\nHTTP_PROXY=\"http://%s:%s/\"\nHTTPS_PROXY=\"http://%s:%s/\"\nALL_PROXY=\"socks5://%s:%s/\"\nno_proxy=\"localhost,127.0.0.1,localaddress,.localdomain.com\"\n", host, port, host, port, host, port, host, port, host, port, host, port)
-	_ = os.WriteFile("/etc/environment", []byte(envContent), 0644)
+	if err := os.WriteFile("/etc/environment", []byte(envContent), 0644); err != nil {
+		return commandError("Failed to write /etc/environment", "", err)
+	}
 
 	// 3. Persistent Profile Script for Shell Sessions
 	_ = os.MkdirAll("/etc/environment.d", 0755)
@@ -394,7 +480,9 @@ func disableSystemProxy() string {
 		_, _ = runCommand("gsettings", "set", "org.gnome.system.proxy", "mode", "none")
 	}
 
-	_ = os.WriteFile("/etc/environment", []byte(""), 0644)
+	if err := os.WriteFile("/etc/environment", []byte(""), 0644); err != nil {
+		return commandError("Failed to clear /etc/environment", "", err)
+	}
 	_ = os.Remove("/etc/environment.d/99-switcher-proxy.conf")
 	_ = os.Remove("/etc/profile.d/switcher_proxy.sh")
 
@@ -432,6 +520,120 @@ func showBootModeMenu() {
 	}
 }
 
+const switchLogFile = "/tmp/switcher-switch.log"
+
+// detectDisplayManager identifies the display manager actually configured on
+// this host instead of assuming lightdm/gdm3/sddm are all present. Returns ""
+// if none can be identified, so callers can fall back to graphical.target.
+func detectDisplayManager() string {
+	if data, err := os.ReadFile("/etc/X11/default-display-manager"); err == nil {
+		dm := strings.TrimSpace(string(data))
+		dm = filepath.Base(dm)
+		if dm != "" {
+			if !strings.HasSuffix(dm, ".service") {
+				dm += ".service"
+			}
+			return dm
+		}
+	}
+
+	for _, svc := range []string{"lightdm.service", "gdm.service", "gdm3.service", "sddm.service"} {
+		if out, err := runCommand("systemctl", "list-unit-files", svc); err == nil && strings.Contains(out, svc) {
+			return svc
+		}
+	}
+
+	return ""
+}
+
+// runDetachedModeSwitch launches script so it survives the current session
+// being torn down by the switch itself (e.g. stopping the display manager
+// that owns the invoking session's cgroup). It prefers a transient systemd
+// scope, falling back to setsid, and finally to a plain background process.
+// launchDetached starts name/args as its own session (SysProcAttr.Setsid),
+// with stdio pointed at /dev/null so it has no controlling terminal to lose,
+// and releases Go's handle on the process so it survives independently of
+// this process -- including a SIGHUP when the invoking terminal closes.
+func launchDetached(devNull *os.File, name string, args ...string) bool {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	_ = cmd.Process.Release()
+	return true
+}
+
+func runDetachedModeSwitch(script string) {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		devNull = nil
+	} else {
+		defer devNull.Close()
+	}
+
+	if commandExists("systemd-run") {
+		if launchDetached(devNull, "systemd-run", "--scope", "setsid", "bash", "-c", script) {
+			return
+		}
+	}
+
+	if commandExists("setsid") {
+		if launchDetached(devNull, "setsid", "bash", "-c", script) {
+			return
+		}
+	}
+
+	launchDetached(devNull, "bash", "-c", script)
+}
+
+func buildGuiSwitchScript(dm string) string {
+	startCmd := "systemctl isolate graphical.target"
+	if dm != "" {
+		startCmd = "systemctl start " + dm
+	}
+
+	return fmt.Sprintf(`{
+echo "=== $(date '+%%Y-%%m-%%d %%H:%%M:%%S') switch-to-gui ==="
+timeout 10 %s || echo "[switcher] display manager start failed or timed out"
+sleep 1
+chvt 7 || chvt 2 || echo "[switcher] chvt failed"
+echo "[switcher] switch-to-gui complete"
+} >>%s 2>&1
+`, startCmd, switchLogFile)
+}
+
+func buildTtySwitchScript(dm string) string {
+	stopCmd := "systemctl isolate multi-user.target"
+	if dm != "" {
+		stopCmd = "systemctl stop " + dm
+	}
+
+	return fmt.Sprintf(`{
+echo "=== $(date '+%%Y-%%m-%%d %%H:%%M:%%S') switch-to-tty ==="
+systemctl enable --now getty@tty1.service || echo "[switcher] failed to enable getty@tty1"
+systemctl restart getty@tty1.service || echo "[switcher] failed to restart getty@tty1"
+systemctl start getty@tty2.service || true
+timeout 10 %s || echo "[switcher] display manager stop failed or timed out"
+chvt 1 || openvt -c 1 -- /bin/login || echo "[switcher] chvt failed"
+echo "[switcher] switch-to-tty complete"
+} >>%s 2>&1
+`, stopCmd, switchLogFile)
+}
+
+func printSwitchRecoveryHint(target string) {
+	printBoxBlankRow("\n")
+	printBoxRow(" "+FgCyan+"[i] Switch to "+target+" dispatched in the background."+Reset, "\n")
+	printBoxRow("     If the screen does not change within ~10 seconds:", "\n")
+	printBoxRow("     - Try Ctrl+Alt+F1 through F7 to find the active VT manually.", "\n")
+	printBoxRow("     - Check "+FgBright+switchLogFile+Reset+" for what the switch actually did.", "\n")
+	printBoxRow("     - Re-run this wizard and choose the mode again if needed.", "\n")
+}
+
 func handleImmediateSwitch() {
 	for {
 		choice := SelectFromOptions(
@@ -447,7 +649,13 @@ func handleImmediateSwitch() {
 		switch choice {
 		case 0:
 			showHeader("CONFIRM SWITCH TO GUI")
-			printBoxRow(" "+FgCyan+"[i] Activating graphical desktop (LightDM/GDM/SDDM)..."+Reset, "\n")
+			dm := detectDisplayManager()
+			if dm == "" {
+				printBoxRow(" "+FgAmber+"[!] No known display manager (lightdm/gdm/gdm3/sddm) was detected."+Reset, "\n")
+				printBoxRow("     Falling back to 'systemctl isolate graphical.target'.", "\n")
+			} else {
+				printBoxRow(" "+FgCyan+"[i] Activating graphical desktop ("+dm+")..."+Reset, "\n")
+			}
 			printBoxBlankRow("\n")
 
 			if !confirmAction("Start graphical desktop environment now?") {
@@ -457,17 +665,11 @@ func handleImmediateSwitch() {
 				continue
 			}
 
-			script := `
-				(
-					systemctl start lightdm.service >/dev/null 2>&1 || systemctl start gdm3.service >/dev/null 2>&1 || systemctl start sddm.service >/dev/null 2>&1 || systemctl isolate graphical.target >/dev/null 2>&1
-					sleep 1
-					chvt 7 || chvt 2
-				) >/dev/null 2>&1 &
-			`
-
-			cmd := exec.Command("bash", "-c", script)
-			_ = cmd.Start()
-			os.Exit(0)
+			runDetachedModeSwitch(buildGuiSwitchScript(dm))
+			showHeader("GUI SWITCH DISPATCHED")
+			printSwitchRecoveryHint("GUI desktop")
+			pauseAction()
+			return
 
 		case 1:
 			showHeader("CONFIRM SWITCH TO TTY / CLI")
@@ -482,20 +684,12 @@ func handleImmediateSwitch() {
 				continue
 			}
 
-			script := `
-				(
-					systemctl enable --now getty@tty1.service >/dev/null 2>&1
-					systemctl restart getty@tty1.service >/dev/null 2>&1
-					systemctl start getty@tty2.service >/dev/null 2>&1
-					systemctl stop lightdm.service >/dev/null 2>&1 || systemctl stop gdm3.service >/dev/null 2>&1 || systemctl stop sddm.service >/dev/null 2>&1
-					sleep 0.5
-					chvt 1 || openvt -c 1 -- /bin/login
-				) >/dev/null 2>&1 &
-			`
-
-			cmd := exec.Command("bash", "-c", script)
-			_ = cmd.Start()
-			os.Exit(0)
+			dm := detectDisplayManager()
+			runDetachedModeSwitch(buildTtySwitchScript(dm))
+			showHeader("TTY SWITCH DISPATCHED")
+			printSwitchRecoveryHint("TTY / CLI console")
+			pauseAction()
+			return
 
 		default:
 			return
@@ -564,6 +758,7 @@ func handleNextBootSwitch() {
 			showHeader("SYSTEM REBOOT INITIATED")
 			printBoxRow(" "+FgAmber+Bold+"[!] Restarting Linux operating system now..."+Reset, "\n")
 			_, _ = runCommand("systemctl", "reboot")
+			restoreNormalScreen()
 			os.Exit(0)
 		} else {
 			showHeader("CONFIGURATION SAVED")
@@ -672,9 +867,8 @@ func runNetworkTroubleshooter() []DiagnosticStep {
 		step1.Passed = false
 		step1.Details = fmt.Sprintf("Hostname '%s' missing from /etc/hosts (causes sudo lag and lookup errors).", hostname)
 
-		fixedHosts := fmt.Sprintf("127.0.0.1\tlocalhost %s\n::1\t\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n", hostname, hostname)
-		_ = os.WriteFile("/etc/hosts", []byte(fixedHosts), 0644)
-		step1.FixLog = "Injected active hostname '" + hostname + "' into /etc/hosts."
+		syncLinuxHostsFile(hostname)
+		step1.FixLog = "Merged active hostname '" + hostname + "' into /etc/hosts (backup at /etc/hosts.switcher.bak)."
 	} else {
 		step1.Passed = true
 		step1.Details = "Hostname '" + hostname + "' correctly mapped to 127.0.0.1."
@@ -741,9 +935,14 @@ func runNetworkTroubleshooter() []DiagnosticStep {
 		step4.Passed = false
 		step4.Details = "Resolvers missing or port 53 queries failing."
 
-		fallbackResolv := "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 192.168.0.1\n"
-		_ = os.WriteFile("/etc/resolv.conf", []byte(fallbackResolv), 0644)
-		step4.FixLog = "Wrote fallback public & router DNS servers to /etc/resolv.conf."
+		if isSystemdResolvedManaged() {
+			_, _ = applyResolvedDNS(primaryIface, []string{"1.1.1.1", "8.8.8.8", "192.168.0.1"})
+			step4.FixLog = "Applied fallback DNS via resolvectl (systemd-resolved detected)."
+		} else {
+			fallbackResolv := "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 192.168.0.1\n"
+			_ = os.WriteFile("/etc/resolv.conf", []byte(fallbackResolv), 0644)
+			step4.FixLog = "Wrote fallback public & router DNS servers to /etc/resolv.conf."
+		}
 		steps = append(steps, step4)
 	} else {
 		step4 := DiagnosticStep{Name: "DNS Configuration (/etc/resolv.conf)"}
