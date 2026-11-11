@@ -26,7 +26,7 @@ Built for developers, sysadmins, and network engineers who live in the terminal 
 
 <br/>
 
-[**Why**](#why) · [**Features**](#features) · [**Install**](#install) · [**Preview**](#preview) · [**Modules**](#modules) · [**Build System**](#build) · [**Safety**](#safety) · [**Architecture**](#architecture) · [**FAQ**](#faq) · [**Roadmap**](#roadmap)
+[**Why**](#why) · [**Features**](#features) · [**Install**](#install) · [**Preview**](#preview) · [**Modules**](#modules) · [**Build System**](#build) · [**Terminal Behavior**](#terminal) · [**Safety**](#safety) · [**Architecture**](#architecture) · [**Tested On**](#tested) · [**FAQ**](#faq) · [**Roadmap**](#roadmap)
 
 </div>
 
@@ -38,7 +38,7 @@ Built for developers, sysadmins, and network engineers who live in the terminal 
 
 <table align="center">
   <tr>
-    <td align="center"><h3>9</h3><sub>Control-center<br/>modules</sub></td>
+    <td align="center"><h3>10</h3><sub>Control-center<br/>modules</sub></td>
     <td align="center"><h3>3</h3><sub>Operating systems<br/>(Linux, Windows, macOS)</sub></td>
     <td align="center"><h3>1</h3><sub>Self-healing<br/>Go bootstrap</sub></td>
     <td align="center"><h3>5</h3><sub>Network audit<br/>&amp; auto-heal phases</sub></td>
@@ -97,7 +97,8 @@ Switcher Suite Wizard puts the whole control plane behind **one keyboard-driven 
 | 🔀 | **Proxy configuration engine** | Enable/disable a system-wide HTTP/HTTPS/SOCKS proxy with a **live TCP probe** before applying, built-in operator guidelines, and full CLI + browser coverage |
 | 🩺 | **Automated network troubleshooter** | A 5-phase self-healing audit: hostname/hosts integrity → adapter check → default gateway → DNS resolution → ICMP reachability, auto-repairing what it finds broken |
 | 🔁 | **Restart network service** | Cycle the OS network daemon (`NetworkManager`, adapter toggle, or `configd`) without a full reboot |
-| 🌍 | **Global CLI integration** | Register `switcher-wizard` (or a custom alias) system-wide with auto-root/auto-elevation baked in |
+| 🌍 | **Global CLI integration** | Register `switcher-wizard` (or a custom alias) system-wide with auto-root/auto-elevation baked in — blocks collisions with real system commands and never overwrites a file it didn't create itself |
+| 🔐 | **SSH Server (Install / Enable)** | Status at a glance (installed/enabled/running/listening port/firewall), one confirmation to install+enable+start, a separate confirmation to open the firewall, and a lockout warning if you're disabling it while connected over SSH |
 | 🚑 | **Offline rescue script** | `rescue-network.sh` — a standalone Bash script with **no Go, no build step, no internet required** — for when the network is too broken to even compile the tool |
 | 🛡️ | **Self-elevating everywhere** | Detects privilege level on launch and re-executes itself via `sudo` or UAC automatically — no manual `sudo ./binary` |
 | 🧱 | **Self-healing build wrapper** | `autorun.sh` / `.bat` / `.ps1` auto-detect or auto-provision a portable Go toolchain, format, vet, test, and build — with normal, force, and hard-purge modes |
@@ -211,10 +212,16 @@ This restores `/etc/hosts`, re-establishes the default gateway, resets DNS to kn
 ║
 ║ ── GLOBAL INTEGRATION ─────────────────────────────────────────────────────
 ║    Global CLI Integration
+║
+║ ── REMOTE ACCESS ──────────────────────────────────────────────────────────
+║    SSH Server (Install / Enable)
 ╠════════════════════════════════════════════════════════════════════════════╣
 ║ [↑/↓] Navigate │ [ENTER] Select │ [Q] Exit
 ╚════════════════════════════════════════════════════════════════════════════╝
 ```
+
+> [!NOTE]
+> The whole wrapper (menu, build/test output, and the binary itself) now runs on the terminal's **alternate screen** — exactly like `vim`/`less`. On any exit, your original screen and scrollback are restored untouched; nothing from a session ever leaks into your shell history. See [Terminal Behavior](#terminal) below.
 
 </details>
 
@@ -258,6 +265,27 @@ Apply system-wide proxy settings? (Type 'y' to confirm)
 
 </details>
 
+<details>
+<summary><b>🔐 SSH Server — status before you touch anything</b></summary>
+
+```text
+ACTIVE MODULE => SSH SERVER (INSTALL / ENABLE)
+
+Installed: Yes
+Enabled:   Yes
+Running:   Yes
+Listening: port 22
+Select Action:
+
+=>  Re-Confirm SSH Server Is Enabled
+    Disable SSH Server
+    Return to Main Menu
+```
+
+If the server isn't already set up, the first option reads **"Install / Enable SSH Server"** instead, and shows exactly what will change (install the package, validate the config, enable + start the service) before asking for a single confirmation. A firewall-allow step only appears as a *second*, separate confirmation when one is actually needed.
+
+</details>
+
 ---
 
 <a id="workflow"></a>
@@ -283,13 +311,14 @@ flowchart TD
     I --> M5["Proxy Engine"]
     I --> M6["Network Troubleshooter"]
     I --> M7["Global CLI Integration"]
+    I --> M8["SSH Server (Install / Enable)"]
 
     classDef start fill:#1f6feb,color:#ffffff,stroke:#0b3d91;
     classDef eng fill:#8250df,color:#ffffff,stroke:#512a97;
     classDef mod fill:#2ea043,color:#ffffff,stroke:#116329;
     class A start;
     class C,D,E,G,H eng;
-    class M1,M2,M3,M4,M5,M6,M7 mod;
+    class M1,M2,M3,M4,M5,M6,M7,M8 mod;
 ```
 
 ---
@@ -307,7 +336,8 @@ flowchart TD
 |---|---|
 | **Immediate switch** | Jump to GUI (starts the display manager / Explorer) or TTY/CLI (stops it) right now, in the current session |
 | **Startup target** | Set what loads on next boot — `graphical.target` / `multi-user.target` on Linux, or the Winlogon `Shell` key on Windows |
-| **Built-in recovery guidance** | Before switching, the wizard prints exact steps to get the desktop back (including the `switcher-wizard` global command and the Task Manager fallback on Windows) |
+| **Detached, non-hanging switch (Linux)** | The GUI/TTY toggle runs as a detached background job (`systemd-run --scope` → `setsid` → plain fallback) that survives the display manager it's stopping, logged to `/tmp/switcher-switch.log`, and the wizard **returns to the main menu** afterward on every OS instead of exiting |
+| **Built-in recovery guidance** | Before switching, the wizard prints exact steps to get the desktop back (including the `switcher-wizard` global command and the Task Manager fallback on Windows), plus what to check in the log if the screen doesn't change within ~10 seconds |
 | **Windows CLI mode** | Drops into a genuine interactive shell (`gui`, `wizard`, `cls`, `exit` built-ins, plus raw PowerShell passthrough) instead of just killing Explorer |
 
 </details>
@@ -319,6 +349,7 @@ flowchart TD
 
 - Validates the new name (RFC-compliant, 1–63 chars, no leading/trailing hyphen)
 - Writes it to the live kernel, `/etc/hostname`, `/etc/hosts` (Linux), `scutil` (macOS), or the registry + WMI (Windows) in one pass
+- **Merges** the new hostname's self-mapping into `/etc/hosts`/`scutil` instead of overwriting the whole file, backing it up first (Linux: `/etc/hosts.switcher.bak`) — any other custom entries (Docker, local dev domains, etc.) survive the change
 - Automatically captures the previous hostname before changing it, so **Restore Previous Hostname** is always one click away
 
 </details>
@@ -385,7 +416,26 @@ Each phase reports pass/fail with details, and every applied fix is logged inlin
 - Registers a system-wide command (default `switcher-wizard`, or any custom alias you choose)
 - Linux/macOS: writes a `sudo`-wrapped shim to `/usr/local/bin` (or `/opt/homebrew/bin`) plus a managed block in your shell profile(s)
 - Windows: adds the binary's directory to `PATH` and drops an auto-elevating `.cmd`/`.bat` shim into `System32`
+- **Collision protection**: a custom alias is checked against both a reserved-command list (`ssh`, `ls`, `sudo`, `systemctl`, `rm`, and ~40 others) and whatever already exists on disk/`PATH` at that name — a name that would overwrite a real command or an unrelated file is refused outright, never silently clobbered
+- **Legacy-shim recognition**: enable/disable can tell "a shim this tool created" apart from "something that was already there," including shims written by an older version of the tool, so re-enabling or disabling never mistakes a foreign file for its own
 - **Disable** cleanly removes the shim and strips the managed block from every profile it touched
+
+</details>
+
+<details>
+<summary><b>🔐 SSH Server (Install / Enable)</b></summary>
+
+<br/>
+
+| Capability | Details |
+|---|---|
+| **Status at a glance** | Installed / enabled / running / the actual listening port (read from the live `sshd -T` / Windows `sshd_config` / macOS `sshd_config` — never assumed to be 22) / firewall state |
+| **Idempotent by design** | Already installed, enabled, and running? The menu offers "Re-Confirm ... Is Enabled" instead of repeating the full install flow — running it again is always safe either way |
+| **One confirmation to change anything** | Shows exactly what will happen (install the package, validate the config, enable + start the service) before asking once |
+| **Firewall is a separate decision** | If `ufw`/`firewalld` (Linux) or Windows Defender Firewall is active and doesn't already allow SSH, a **second, independent confirmation** offers to open it — Windows's rule is restricted to the Private/Domain profiles, never Public, and nothing firewall-related changes unless you say yes to that specific prompt |
+| **Lockout-aware disable** | Disabling while the running session's own `SSH_CONNECTION` is set shows an explicit warning (with the actual connection string) and requires its own confirmation, instead of the normal one-line prompt |
+| **Real errors, not fake success** | A failed config test, install, or service start is reported with the actual command output — never a hardcoded "done" |
+| **Platform specifics** | Linux: detects `apt`/`dnf`/`yum`/`pacman`/`zypper`/`apk`, runs `ssh-keygen -A` + `sshd -t` before touching the service, handles `ssh.socket` activation. Windows: `Get-WindowsCapability`/`Add-WindowsCapability`, service set to Automatic. macOS: toggles the built-in Remote Login service (`systemsetup -setremotelogin`); no separate firewall step is needed since it's a system service, not an app |
 
 </details>
 
@@ -427,6 +477,23 @@ Cache control: plain run reuses caches for speed, `-f` clears build/test caches 
 
 ---
 
+<a id="terminal"></a>
+
+## 🖵 Terminal Behavior
+
+Running `./autorun.sh` (or the compiled binary directly) never disturbs whatever was already on your screen.
+
+| Behavior | Details |
+|---|---|
+| **Alternate screen, like `vim`/`less`** | The wrapper enters the terminal's alternate screen before printing anything (banner, build output, the binary's own menu), and leaves it on every exit path — normal quit, `Ctrl+C`, `SIGTERM`, `SIGHUP`, closed stdin/EOF, or a build error. Your original screen and scrollback are restored exactly; nothing from the session leaks into your shell history |
+| **No scrollback wipe** | Only cursor-home + erase-within-the-alternate-screen sequences are used — never a scrollback-erasing `clear`/`\033[3J`. (A previous version's `clear` call at startup did wipe scrollback; it's gone) |
+| **Single ownership, no nesting** | When `autorun.sh` launches the compiled binary, it passes `--alt-screen-managed` so the binary doesn't also try to enter/leave the alternate screen — the two never fight over who owns it |
+| **Errors stay readable** | If the build fails, the alternate screen is left *first*, then the error is printed — so it lands on your real terminal, not a buffer about to disappear |
+| **Skipped when it would get in the way** | `--help` and any non-interactive/piped invocation never touch the alternate screen at all |
+| **Correct colors** | ANSI color codes render as actual colors in every code path, including ones that pass a color variable through `printf`'s `%s` (a previous version could print literal `\033[...m` text instead in that specific path) |
+
+---
+
 <a id="safety"></a>
 
 ## 🛡️ Safety and Reversibility
@@ -440,6 +507,8 @@ Switcher Suite Wizard changes system-level state, so every risky action is gated
 | 🧪 **Live probing before proxy changes** | The proxy engine tests the socket *before* you commit, so you're never surprised by a dead listener |
 | 🩺 **Non-destructive diagnostics** | The troubleshooter reports every phase's status before applying any fix, and logs exactly what it changed |
 | 🔑 **Privilege gating** | Every mutating operation checks for root/Administrator first and explains exactly how to re-launch elevated if it's missing |
+| 🔐 **SSH lockout awareness** | Disabling the SSH server while connected over SSH (`SSH_CONNECTION` is set) shows an explicit warning naming the active connection and requires its own confirmation, separate from the normal prompt |
+| 🧯 **Firewall changes are opt-in, never bundled** | The SSH feature only ever opens a firewall rule after its own dedicated confirmation — enabling the server never silently touches the firewall |
 | 🚑 **Dependency-free fallback** | `rescue-network.sh` exists specifically so a broken network never leaves you unable to fix it |
 
 ### 🔒 Security Notes
@@ -466,6 +535,8 @@ Switcher Suite Wizard changes system-level state, so every risky action is gated
 | `.go_runtime/` | 🐧 🍎 🪟 | Portable Go toolchain, auto-provisioned by the build wrapper if none is found system-wide |
 | `# >>> SWITCHER SUITE CLI BLOCK >>>` | 🐧 🍎 | Managed block appended to `.bashrc` / `.zshrc` / `.bash_profile` / `.profile` by Global CLI Integration |
 | `HKLM\...\Winlogon\Shell` | 🪟 | Registry key updated when setting the next-boot startup shell |
+| `/etc/hosts.switcher.bak` | 🐧 | Backup of `/etc/hosts` taken before the Hostname Manager merges in the new self-mapping |
+| `/tmp/switcher-switch.log` | 🐧 | Append-only log of what the detached GUI/TTY mode-switch script actually did — check here first if a switch doesn't visibly take effect within ~10 seconds |
 
 ---
 
@@ -506,6 +577,32 @@ flowchart TD
 | 🚑 **Standalone rescue path** | `rescue-network.sh` deliberately has zero dependency on the Go binary, so a broken network never blocks you from fixing the network |
 | 🖥️ **Full ANSI truecolor UI** | Custom `visibleWidth`/`padDisplayWidth` helpers correctly measure ANSI-escaped and Unicode box-drawing strings, so the boxed layout stays aligned across terminals |
 | 🪟 **Native Windows console tuning** | `windows_console.go` calls the Win32 console API directly to enable virtual terminal processing and safely resize the buffer/window without the "flash to 1×1" bug common in naive implementations |
+
+---
+
+<a id="tested"></a>
+
+## 🧪 Tested On
+
+An honest account of how each feature has actually been verified, not just what the code is supposed to do. **Runtime-tested** means a real build was launched and the behavior was observed end-to-end on that OS. **Unit-tested only** means its pure logic (parsing, validation, command-argv building, idempotency decisions) has automated test coverage, but the feature itself has never been executed against a real system. **Not tested** means neither has happened yet.
+
+| Feature | 🐧 Linux | 🪟 Windows | 🍎 macOS |
+|---|:-:|:-:|:-:|
+| Terminal alternate-screen / scrollback safety | ✅ Runtime-tested | ⬜ Not tested | ⬜ Not tested |
+| Build wrapper (`autorun.sh` / `.bat` / `.ps1`) | ✅ Runtime-tested | 🟡 Unit-tested only¹ | 🟡 Unit-tested only¹ |
+| Main menu navigation & Global CLI collision checks | ✅ Runtime-tested (nav) + 🟡 unit-tested (collision logic) | 🟡 Unit-tested only | 🟡 Unit-tested only |
+| System Mode Switcher (GUI ↔ TTY/CLI) | ⬜ Not tested² | ⬜ Not tested² | n/a (not supported by design) |
+| Hostname Manager (set / rollback / `/etc/hosts` merge+backup) | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
+| IP Address Manager | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
+| DNS Resolver Switcher | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
+| Proxy Configuration (incl. IPv6 endpoint handling) | 🟡 Unit-tested only | 🟡 Unit-tested only | 🟡 Unit-tested only |
+| Automated Network Troubleshooter | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
+| SSH Server — status / idempotency decision | ✅ Runtime-tested (read-only) | 🟡 Unit-tested only | 🟡 Unit-tested only |
+| SSH Server — install/enable/disable/firewall mutation | ⬜ Not tested³ | ⬜ Not tested³ | ⬜ Not tested³ |
+
+¹ Cross-compiles cleanly and `go vet`/`go test -c` type-check its OS-specific Go code; the shell/batch/PowerShell script itself has only actually been *run* on Linux.
+² This engagement's safety rules forbade making real install/enable/service/network changes on the machine used for development — every mutating feature has solid input-validation unit tests, but the feature as a whole has not been exercised against a live system since the original audit that preceded this work.
+³ Deliberately never executed anywhere, including on Linux where the menu itself was runtime-tested — every confirmation prompt was reached and cancelled, never confirmed. See the manual VM checklist in this repo's own change history for the exact steps to runtime-verify it.
 
 ---
 
@@ -585,10 +682,12 @@ Disable Global CLI Integration from the menu first (this cleans up shims and she
 ## 🧭 Roadmap
 
 - [ ] 🍎 Bring System Mode Switcher parity to macOS where feasible
-- [ ] 📄 Add a `LICENSE` file and tagged GitHub Releases
+- [x] 📄 Add a `LICENSE` file
+- [ ] 🏷️ Tagged GitHub Releases
 - [ ] 🧪 Automated CI (build + `go vet` + `go test`) across all three OS targets
 - [ ] 🎨 Config-file-driven proxy/DNS presets
 - [ ] 📸 Terminal recording / demo GIF gallery
+- [ ] 🖥️ Runtime-verify every mutating feature (not just unit tests) on real Linux/Windows/macOS hardware or VMs — see [Tested On](#tested)
 
 ---
 
