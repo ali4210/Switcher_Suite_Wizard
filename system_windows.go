@@ -660,6 +660,13 @@ func enableGlobalCLI(cmdName string) (string, error) {
 	}
 	execDir := filepath.Dir(execPath)
 
+	cmdShimPath := filepath.Join("C:\\Windows\\System32", cmdName+".cmd")
+	batShimPath := filepath.Join("C:\\Windows\\System32", cmdName+".bat")
+
+	if err := checkCliAliasSafeToClaim(cmdName, []string{cmdShimPath, batShimPath}); err != nil {
+		return "", err
+	}
+
 	psScript := fmt.Sprintf(`
 		$dir = '%s'
 		$path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -676,6 +683,7 @@ func enableGlobalCLI(cmdName string) (string, error) {
 
 	// Safe UAC auto-elevating shim without empty ArgumentList bug
 	shimContent := fmt.Sprintf(`@echo off
+REM %s
 net session >nul 2>&1
 if %%errorLevel%% == 0 (
     "%s" %%*
@@ -686,10 +694,10 @@ if %%errorLevel%% == 0 (
         powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%s' -ArgumentList '%%*' -Verb RunAs"
     )
 )
-`, execPath, execPath, execPath)
+`, cliShimMarker, execPath, execPath, execPath)
 
-	_ = os.WriteFile(filepath.Join("C:\\Windows\\System32", cmdName+".cmd"), []byte(shimContent), 0644)
-	_ = os.WriteFile(filepath.Join("C:\\Windows\\System32", cmdName+".bat"), []byte(shimContent), 0644)
+	_ = os.WriteFile(cmdShimPath, []byte(shimContent), 0644)
+	_ = os.WriteFile(batShimPath, []byte(shimContent), 0644)
 
 	saveActiveCliCommand(cmdName)
 	return fmt.Sprintf("Global Windows CLI enabled for '%s'. Auto-root UAC prompt configured.", cmdName), nil
@@ -701,8 +709,14 @@ func disableGlobalCLI() (string, error) {
 		cmdName = "switcher-wizard"
 	}
 
-	_ = os.Remove(filepath.Join("C:\\Windows\\System32", cmdName+".cmd"))
-	_ = os.Remove(filepath.Join("C:\\Windows\\System32", cmdName+".bat"))
+	for _, p := range []string{
+		filepath.Join("C:\\Windows\\System32", cmdName+".cmd"),
+		filepath.Join("C:\\Windows\\System32", cmdName+".bat"),
+	} {
+		if fileHasCliShimMarker(p) {
+			_ = os.Remove(p)
+		}
+	}
 
 	removeActiveCliRecord()
 	return fmt.Sprintf("Global Windows CLI for '%s' removed.", cmdName), nil
