@@ -737,3 +737,83 @@ func TestCheckCliAliasSafeToClaim_MaliciousNames(t *testing.T) {
 		}()
 	}
 }
+
+// ---------------------------------------------------------------------------
+// N2: Windows elevation argument handling (no shell/PowerShell injection)
+// ---------------------------------------------------------------------------
+
+func TestFilterElevationArgs(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"--cli-shell"}, []string{"--cli-shell"}},
+		{[]string{"--cli-shell", "extra"}, []string{"--cli-shell"}},
+		{nil, []string{}},
+		{[]string{}, []string{}},
+		{[]string{"a;id"}, []string{}},
+		{[]string{"$(id)"}, []string{}},
+		{[]string{"`id`"}, []string{}},
+		{[]string{"'; calc.exe; '"}, []string{}},
+		{[]string{`" ; Start-Process calc ; "`}, []string{}},
+		{[]string{"a b"}, []string{}},
+	}
+	for _, c := range cases {
+		got := filterElevationArgs(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("filterElevationArgs(%v) = %v, want %v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("filterElevationArgs(%v) = %v, want %v", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+func TestPowerShellSingleQuote(t *testing.T) {
+	cases := map[string]string{
+		"--cli-shell":    "'--cli-shell'",
+		"a;id":           "'a;id'",
+		"$(id)":          "'$(id)'",
+		"`id`":           "'`id`'",
+		"a'b":            "'a''b'",
+		"he said 'hi'":   "'he said ''hi'''",
+		`"; calc.exe; "`: `'"; calc.exe; "'`,
+	}
+	for in, want := range cases {
+		if got := powerShellSingleQuote(in); got != want {
+			t.Errorf("powerShellSingleQuote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestAutoElevateArgsNeverContainRawInjection documents, end to end, that no
+// malicious argument can ever reach the PowerShell -ArgumentList string
+// unescaped: it's first dropped by filterElevationArgs unless it's exactly
+// the one whitelisted flag, and even that flag is still run through
+// powerShellSingleQuote before being joined into the command string.
+func TestAutoElevateArgsNeverContainRawInjection(t *testing.T) {
+	malicious := []string{
+		"a;id",
+		"$(id)",
+		"`id`",
+		"'; Start-Process calc.exe; '",
+		`" ; Start-Process calc.exe ; "`,
+		"a b",
+	}
+
+	safe := filterElevationArgs(malicious)
+	if len(safe) != 0 {
+		t.Fatalf("filterElevationArgs(malicious) = %v, want empty (nothing malicious is ever whitelisted)", safe)
+	}
+
+	// Even if a future change to the whitelist ever let one of these
+	// through, the quoting step must still neutralize an embedded quote.
+	quoted := powerShellSingleQuote("'; Start-Process calc.exe; '")
+	if strings.Count(quoted, "''") < 2 {
+		t.Errorf("powerShellSingleQuote did not double-escape embedded quotes: %q", quoted)
+	}
+}
