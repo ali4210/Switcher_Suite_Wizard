@@ -173,18 +173,44 @@ func getCurrentProxy() string {
 
 	// 2. Check WinHTTP Subsystem (System)
 	outWinHTTP, errWinHTTP := runCommand("netsh", "winhttp", "show", "proxy")
-	if errWinHTTP == nil && strings.Contains(outWinHTTP, "Proxy Server(s) :") {
-		for _, line := range strings.Split(outWinHTTP, "\n") {
-			if strings.Contains(line, "Proxy Server(s) :") {
-				parts := strings.Split(line, ":")
-				if len(parts) >= 2 {
-					return strings.TrimSpace(parts[1])
-				}
-			}
+	if errWinHTTP == nil {
+		if value := parseWinHTTPProxyOutput(outWinHTTP); value != "" {
+			return value
 		}
 	}
 
 	return "DIRECT (Disabled)"
+}
+
+// parseWinHTTPProxyOutput extracts the "Proxy Server(s)" value from
+// `netsh winhttp show proxy` output, e.g. a line like
+// "    Proxy Server(s) :  127.0.0.1:8080". Previously this was read by
+// naively splitting the whole line on every colon and taking the second
+// field -- which silently dropped the port, since a line like that
+// contains two colons, not one (N12). Slicing past the known marker
+// text instead of splitting on ":" fixes that regardless of how many
+// colons the value itself contains. If the value parses as a
+// host:port (via net.SplitHostPort, which understands bracketed IPv6),
+// it's re-rendered via net.JoinHostPort for a canonical bracketed form;
+// otherwise the trimmed raw value is returned as-is rather than
+// erroring out, since this is a read/display-only path.
+func parseWinHTTPProxyOutput(output string) string {
+	const marker = "Proxy Server(s) :"
+	for _, line := range strings.Split(output, "\n") {
+		idx := strings.Index(line, marker)
+		if idx == -1 {
+			continue
+		}
+		value := strings.TrimSpace(line[idx+len(marker):])
+		if value == "" {
+			return ""
+		}
+		if host, port, err := net.SplitHostPort(value); err == nil {
+			return net.JoinHostPort(host, port)
+		}
+		return value
+	}
+	return ""
 }
 
 func getNetworkInterfaces() []string {

@@ -330,3 +330,51 @@ func TestParseWindowsSSHDConfigPort(t *testing.T) {
 		}
 	}
 }
+
+// TestParseWinHTTPProxyOutput is the regression test for N12: the old
+// naive strings.Split(line, ":") dropped the port because the real
+// `netsh winhttp show proxy` line contains two colons ("Proxy Server(s)
+// :  host:port"), not one.
+func TestParseWinHTTPProxyOutput(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			name: "IPv4 host:port -- must keep the port (N12 regression)",
+			output: "Current WinHTTP proxy settings:\n\n" +
+				"    Proxy Server(s) :  127.0.0.1:8080\n" +
+				"    Bypass List     :  (none)\n",
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "hostname:port",
+			output: "Current WinHTTP proxy settings:\n\n" +
+				"    Proxy Server(s) :  proxy.company.com:3128\n",
+			want: "proxy.company.com:3128",
+		},
+		{
+			name: "bracketed IPv6 host:port stays bracketed",
+			output: "Current WinHTTP proxy settings:\n\n" +
+				"    Proxy Server(s) :  [::1]:8080\n",
+			want: "[::1]:8080",
+		},
+		{
+			name: "direct access configured -- no Proxy Server(s) line",
+			output: "Current WinHTTP proxy settings:\n\n" +
+				"    Direct access (no proxy server).\n",
+			want: "",
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   "",
+		},
+	}
+	for _, c := range cases {
+		if got := parseWinHTTPProxyOutput(c.output); got != c.want {
+			t.Errorf("%s: parseWinHTTPProxyOutput(...) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
