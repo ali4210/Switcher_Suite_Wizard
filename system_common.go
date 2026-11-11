@@ -392,6 +392,12 @@ func validateDNSServers(servers []string) error {
 	return nil
 }
 
+// validProxyHostPattern allowlists the characters a hostname or IPv4 address
+// can legally contain. Anything else (quotes, backticks, $(), ;, |, &, etc.)
+// is rejected before the value ever reaches a shell-sourced profile script
+// or a PowerShell -Command string.
+var validProxyHostPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$`)
+
 func parseAndValidateProxy(input string) (string, string, error) {
 	input = strings.TrimSpace(input)
 	input = strings.TrimPrefix(input, "http://")
@@ -413,8 +419,8 @@ func parseAndValidateProxy(input string) (string, string, error) {
 		return "", "", errors.New("proxy host cannot be blank")
 	}
 
-	if strings.ContainsAny(host, " \t\r\n/\\") {
-		return "", "", errors.New("proxy host cannot contain whitespace or slashes")
+	if !validProxyHostPattern.MatchString(host) {
+		return "", "", errors.New("proxy host may only contain letters, numbers, dots, and hyphens (no quotes, spaces, or shell characters)")
 	}
 
 	portNum, err := strconv.Atoi(port)
