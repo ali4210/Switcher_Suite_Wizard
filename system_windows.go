@@ -102,7 +102,10 @@ func setSystemHostname(newName string) (string, error) {
 	newName = strings.TrimSpace(newName)
 
 	// 1. Update Win32 Registry ComputerName entries directly
-	_, _ = runCommand("reg", "add", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\ComputerName\\ComputerName", "/v", "ComputerName", "/t", "REG_SZ", "/d", newName, "/f")
+	output, err := runCommand("reg", "add", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\ComputerName\\ComputerName", "/v", "ComputerName", "/t", "REG_SZ", "/d", newName, "/f")
+	if err != nil {
+		return commandError("Failed to update ComputerName registry key", output, err), err
+	}
 	_, _ = runCommand("reg", "add", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\ComputerName\\ActiveComputerName", "/v", "ComputerName", "/t", "REG_SZ", "/d", newName, "/f")
 	_, _ = runCommand("reg", "add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", "/v", "NV Hostname", "/t", "REG_SZ", "/d", newName, "/f")
 	_, _ = runCommand("reg", "add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", "/v", "Hostname", "/t", "REG_SZ", "/d", newName, "/f")
@@ -347,7 +350,10 @@ func setSystemProxy(host, port string) string {
 	saveActiveProxyRecord(endpoint)
 
 	// 1. Configure System-Level WinHTTP (Services, CLI, PowerShell, Background Updates)
-	_, _ = runCommand("netsh", "winhttp", "set", "proxy", "proxy-server="+endpoint)
+	output, err := runCommand("netsh", "winhttp", "set", "proxy", "proxy-server="+endpoint)
+	if err != nil {
+		return commandError("Failed to configure WinHTTP system proxy", output, err)
+	}
 
 	// 2. Configure User Profile & Browser Layer (WinINET -> Chrome, Edge, Brave)
 	regPath := `HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
@@ -369,7 +375,10 @@ func disableSystemProxy() string {
 	removeActiveProxyRecord()
 
 	// 1. Reset WinHTTP
-	_, _ = runCommand("netsh", "winhttp", "reset", "proxy")
+	output, err := runCommand("netsh", "winhttp", "reset", "proxy")
+	if err != nil {
+		return commandError("Failed to reset WinHTTP system proxy", output, err)
+	}
 
 	// 2. Disable WinINET
 	regPath := `HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings`

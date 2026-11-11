@@ -26,8 +26,12 @@ func setSystemHostname(newName string) (string, error) {
 	if commandExists("hostnamectl") {
 		_, _ = runCommand("hostnamectl", "set-hostname", newName)
 	}
-	_ = os.WriteFile("/etc/hostname", []byte(newName+"\n"), 0644)
-	_ = exec.Command("hostname", newName).Run()
+	if err := os.WriteFile("/etc/hostname", []byte(newName+"\n"), 0644); err != nil {
+		return commandError("Failed to write /etc/hostname", "", err), err
+	}
+	if err := exec.Command("hostname", newName).Run(); err != nil {
+		return commandError("Failed to apply hostname to the running kernel", "", err), err
+	}
 
 	// Merge the new hostname into /etc/hosts instead of overwriting it
 	syncLinuxHostsFile(newName)
@@ -446,7 +450,9 @@ func setSystemProxy(host, port string) string {
 
 	// 2. Global Linux Environment Configuration
 	envContent := fmt.Sprintf("http_proxy=\"http://%s:%s/\"\nhttps_proxy=\"http://%s:%s/\"\nall_proxy=\"socks5://%s:%s/\"\nHTTP_PROXY=\"http://%s:%s/\"\nHTTPS_PROXY=\"http://%s:%s/\"\nALL_PROXY=\"socks5://%s:%s/\"\nno_proxy=\"localhost,127.0.0.1,localaddress,.localdomain.com\"\n", host, port, host, port, host, port, host, port, host, port, host, port)
-	_ = os.WriteFile("/etc/environment", []byte(envContent), 0644)
+	if err := os.WriteFile("/etc/environment", []byte(envContent), 0644); err != nil {
+		return commandError("Failed to write /etc/environment", "", err)
+	}
 
 	// 3. Persistent Profile Script for Shell Sessions
 	_ = os.MkdirAll("/etc/environment.d", 0755)
@@ -473,7 +479,9 @@ func disableSystemProxy() string {
 		_, _ = runCommand("gsettings", "set", "org.gnome.system.proxy", "mode", "none")
 	}
 
-	_ = os.WriteFile("/etc/environment", []byte(""), 0644)
+	if err := os.WriteFile("/etc/environment", []byte(""), 0644); err != nil {
+		return commandError("Failed to clear /etc/environment", "", err)
+	}
 	_ = os.Remove("/etc/environment.d/99-switcher-proxy.conf")
 	_ = os.Remove("/etc/profile.d/switcher_proxy.sh")
 
