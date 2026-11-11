@@ -646,3 +646,48 @@ func probeProxyEndpoint(host, port string) (bool, string) {
 
 	return true, fmt.Sprintf("Socket probe SUCCESS: Active listener detected on %s.", target)
 }
+
+// windowsCliShimAllowedArg is the only argument the Windows Global CLI shim
+// ever forwards across the UAC elevation hop, mirroring allowedElevationArgs
+// in main.go. It's baked into the shim as a fixed literal rather than ever
+// being derived from whatever the caller typed (cmd.exe's "%*"), so the
+// PowerShell command string built below never contains unvalidated input.
+const windowsCliShimAllowedArg = "--cli-shell"
+
+// buildWindowsCliShim renders the .cmd/.bat shim Global CLI Integration
+// installs on Windows. It's kept OS-build-tag-free (pure string templating,
+// no Windows API calls) specifically so it can be unit tested on any
+// platform.
+//
+// The already-elevated branch ("%s" %*) forwards all arguments directly to
+// the trusted executable as plain argv -- cmd.exe doesn't reinterpret that
+// as a further command, so it isn't a shell-injection vector. The
+// not-yet-elevated branch used to splice the raw "%*" into a PowerShell
+// -ArgumentList string literal, which was: a value containing a single
+// quote could break out of it and run arbitrary PowerShell during the UAC
+// hop. Instead, the rendered batch script itself only ever compares the
+// first argument against windowsCliShimAllowedArg with a plain string
+// equality test, and uses that *fixed Go-string-literal* flag -- never the
+// compared value -- as the forwarded argument; any other input (no args,
+// extra args, or anything else) elevates with no arguments at all.
+func buildWindowsCliShim(execPath string) string {
+	quotedPath := powerShellSingleQuote(execPath)
+
+	return fmt.Sprintf(`@echo off
+REM %s
+net session >nul 2>&1
+if %%errorLevel%% == 0 (
+    "%s" %%*
+) else (
+    if "%%~1"=="%s" (
+        if "%%~2"=="" (
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath %s -ArgumentList '%s' -Verb RunAs"
+        ) else (
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath %s -Verb RunAs"
+        )
+    ) else (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath %s -Verb RunAs"
+    )
+)
+`, cliShimMarker, execPath, windowsCliShimAllowedArg, quotedPath, windowsCliShimAllowedArg, quotedPath, quotedPath)
+}

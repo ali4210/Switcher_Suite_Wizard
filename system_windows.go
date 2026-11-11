@@ -681,20 +681,10 @@ func enableGlobalCLI(cmdName string) (string, error) {
 
 	_, _ = runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
 
-	// Safe UAC auto-elevating shim without empty ArgumentList bug
-	shimContent := fmt.Sprintf(`@echo off
-REM %s
-net session >nul 2>&1
-if %%errorLevel%% == 0 (
-    "%s" %%*
-) else (
-    if "%%~1"=="" (
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%s' -Verb RunAs"
-    ) else (
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%s' -ArgumentList '%%*' -Verb RunAs"
-    )
-)
-`, cliShimMarker, execPath, execPath, execPath)
+	// Safe UAC auto-elevating shim: only ever forwards the fixed,
+	// whitelisted --cli-shell flag across the elevation hop, never the raw
+	// "%*" the caller typed -- see buildWindowsCliShim for why.
+	shimContent := buildWindowsCliShim(execPath)
 
 	_ = os.WriteFile(cmdShimPath, []byte(shimContent), 0644)
 	_ = os.WriteFile(batShimPath, []byte(shimContent), 0644)

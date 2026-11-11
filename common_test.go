@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -934,5 +935,83 @@ func TestCheckCliAliasSafeToClaim_ForeignFileSimilarNameStillRefused(t *testing.
 	}
 	if isOwnedCliShimFile(candidate) {
 		t.Error("isOwnedCliShimFile should not consider an unrelated foreign file removable, got true")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// N2 follow-up: Windows Global CLI shim ArgumentList injection
+// (buildWindowsCliShim, system_common.go -- kept build-tag-free so it can
+// be rendered and asserted on from any platform, including this one).
+// ---------------------------------------------------------------------------
+
+// extractPowerShellCommandSegments pulls out the string following each
+// `-Command "..."` in rendered batch content, for inspection.
+func extractPowerShellCommandSegments(t *testing.T, shim string) []string {
+	t.Helper()
+	re := regexp.MustCompile(`-Command "([^\n]*)"`)
+	matches := re.FindAllStringSubmatch(shim, -1)
+	segments := make([]string, 0, len(matches))
+	for _, m := range matches {
+		segments = append(segments, m[1])
+	}
+	return segments
+}
+
+func TestBuildWindowsCliShim_NoRuntimeArgsReachPowerShellCommand(t *testing.T) {
+	shim := buildWindowsCliShim(`C:\Program Files\Switcher\Switcher_Suite_Wizard.exe`)
+
+	segments := extractPowerShellCommandSegments(t, shim)
+	if len(segments) == 0 {
+		t.Fatal("no -Command segments found in rendered shim; test setup is wrong")
+	}
+	for _, seg := range segments {
+		for _, tok := range []string{"%*", "%~1", "%~2"} {
+			if strings.Contains(seg, tok) {
+				t.Errorf("PowerShell -Command segment contains raw batch argument token %q (whatever the caller typed could reach it): %s", tok, seg)
+			}
+		}
+	}
+
+	if !strings.Contains(shim, "-ArgumentList '"+windowsCliShimAllowedArg+"'") {
+		t.Errorf("rendered shim missing the fixed, whitelisted -ArgumentList literal:\n%s", shim)
+	}
+	if !strings.Contains(shim, cliShimMarker) {
+		t.Error("rendered shim missing the shim marker")
+	}
+}
+
+func TestBuildWindowsCliShim_MaliciousExecPathNeverBreaksOutOfQuotes(t *testing.T) {
+	// These are all legal Windows filename characters (only < > : " / \ | ?
+	// * are illegal), so a path like this is a realistic, if unlikely,
+	// install location -- not just a synthetic attack string.
+	maliciousPaths := []string{
+		`C:\Tools\a'b.exe`,
+		`C:\Tools\a;id.exe`,
+		`C:\Tools\a$(id).exe`,
+		"C:\\Tools\\a`id`.exe",
+		`C:\Tools\a b.exe`,
+	}
+
+	for _, path := range maliciousPaths {
+		shim := buildWindowsCliShim(path)
+		segments := extractPowerShellCommandSegments(t, shim)
+		if len(segments) == 0 {
+			t.Fatalf("path %q: no -Command segments found; test setup is wrong", path)
+		}
+
+		quoteCount := strings.Count(path, "'")
+		for _, seg := range segments {
+			if quoteCount > 0 {
+				if doubled := strings.Count(seg, "''"); doubled < quoteCount {
+					t.Errorf("path %q: expected %d embedded quote(s) doubled in segment, got: %s", path, quoteCount, seg)
+				}
+			}
+			// Whatever the path contains, the -ArgumentList value (when
+			// present) must always be exactly the fixed whitelisted flag,
+			// never anything derived from the path.
+			if strings.Contains(seg, "-ArgumentList") && !strings.Contains(seg, "-ArgumentList '"+windowsCliShimAllowedArg+"'") {
+				t.Errorf("path %q: -ArgumentList segment is not the fixed whitelisted literal: %s", path, seg)
+			}
+		}
 	}
 }
