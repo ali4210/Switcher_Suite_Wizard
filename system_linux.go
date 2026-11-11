@@ -643,9 +643,10 @@ func handleImmediateSwitch() {
 			}
 
 			runDetachedModeSwitch(buildGuiSwitchScript(dm))
+			showHeader("GUI SWITCH DISPATCHED")
 			printSwitchRecoveryHint("GUI desktop")
-			restoreNormalScreen()
-			os.Exit(0)
+			pauseAction()
+			return
 
 		case 1:
 			showHeader("CONFIRM SWITCH TO TTY / CLI")
@@ -662,9 +663,10 @@ func handleImmediateSwitch() {
 
 			dm := detectDisplayManager()
 			runDetachedModeSwitch(buildTtySwitchScript(dm))
+			showHeader("TTY SWITCH DISPATCHED")
 			printSwitchRecoveryHint("TTY / CLI console")
-			restoreNormalScreen()
-			os.Exit(0)
+			pauseAction()
+			return
 
 		default:
 			return
