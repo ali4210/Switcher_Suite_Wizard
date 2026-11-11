@@ -2,10 +2,12 @@
 /Switcher_Suite_Wizard.exe
 /Switcher_Suite_Wizard_macOS
 /switcher
+/switcher.exe
 /.switcher_cli_command
 /.switcher_previous_hostname
 /.switcher_default_hostname
 /.switcher_proxy_config
+/.switcher_ssh_firewall_rule
 bin/
 *.log
 .DS_Store

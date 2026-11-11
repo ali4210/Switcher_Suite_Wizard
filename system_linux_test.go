@@ -426,30 +426,34 @@ func TestParseUfwStatusOutput(t *testing.T) {
 	cases := []struct {
 		name          string
 		output        string
+		port          int
 		wantActive    bool
 		wantAllowsSSH bool
 	}{
 		{
 			name:          "inactive",
 			output:        "Status: inactive\n",
+			port:          22,
 			wantActive:    false,
 			wantAllowsSSH: false,
 		},
 		{
-			name: "active, OpenSSH already allowed",
+			name: "active, OpenSSH already allowed, checking the standard port",
 			output: "Status: active\n\n" +
 				"To                         Action      From\n" +
 				"--                         ------      ----\n" +
 				"OpenSSH                    ALLOW       Anywhere\n",
+			port:          22,
 			wantActive:    true,
 			wantAllowsSSH: true,
 		},
 		{
-			name: "active, literal 22/tcp rule",
+			name: "active, literal 22/tcp rule, checking the standard port",
 			output: "Status: active\n\n" +
 				"To                         Action      From\n" +
 				"--                         ------      ----\n" +
 				"22/tcp                     ALLOW       Anywhere\n",
+			port:          22,
 			wantActive:    true,
 			wantAllowsSSH: true,
 		},
@@ -459,15 +463,36 @@ func TestParseUfwStatusOutput(t *testing.T) {
 				"To                         Action      From\n" +
 				"--                         ------      ----\n" +
 				"80/tcp                     ALLOW       Anywhere\n",
+			port:          22,
+			wantActive:    true,
+			wantAllowsSSH: false,
+		},
+		{
+			name: "active, custom port 2222 allowed",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"2222/tcp                   ALLOW       Anywhere\n",
+			port:          2222,
+			wantActive:    true,
+			wantAllowsSSH: true,
+		},
+		{
+			name: "active, OpenSSH profile present but checking a custom port -- must NOT count as allowed",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"OpenSSH                    ALLOW       Anywhere\n",
+			port:          2222,
 			wantActive:    true,
 			wantAllowsSSH: false,
 		},
 	}
 	for _, c := range cases {
-		active, allowsSSH := parseUfwStatusOutput(c.output)
+		active, allowsSSH := parseUfwStatusOutput(c.output, c.port)
 		if active != c.wantActive || allowsSSH != c.wantAllowsSSH {
-			t.Errorf("%s: parseUfwStatusOutput(...) = (active=%v, allowsSSH=%v), want (%v, %v)",
-				c.name, active, allowsSSH, c.wantActive, c.wantAllowsSSH)
+			t.Errorf("%s: parseUfwStatusOutput(..., %d) = (active=%v, allowsSSH=%v), want (%v, %v)",
+				c.name, c.port, active, allowsSSH, c.wantActive, c.wantAllowsSSH)
 		}
 	}
 }
@@ -506,24 +531,79 @@ func TestParseFirewalldServicesOutput(t *testing.T) {
 }
 
 func TestBuildFirewallAllowCommands(t *testing.T) {
-	ufw := buildFirewallAllowCommands("ufw")
+	ufw := buildFirewallAllowCommands("ufw", 22)
 	if len(ufw) != 1 || strings.Join(ufw[0], " ") != "ufw allow OpenSSH" {
-		t.Errorf("buildFirewallAllowCommands(ufw) = %v, want [[ufw allow OpenSSH]]", ufw)
+		t.Errorf("buildFirewallAllowCommands(ufw, 22) = %v, want [[ufw allow OpenSSH]]", ufw)
 	}
 
-	firewalld := buildFirewallAllowCommands("firewalld")
+	ufwCustom := buildFirewallAllowCommands("ufw", 2222)
+	if len(ufwCustom) != 1 || strings.Join(ufwCustom[0], " ") != "ufw allow 2222/tcp" {
+		t.Errorf("buildFirewallAllowCommands(ufw, 2222) = %v, want [[ufw allow 2222/tcp]]", ufwCustom)
+	}
+
+	firewalld := buildFirewallAllowCommands("firewalld", 22)
 	if len(firewalld) != 2 {
-		t.Fatalf("buildFirewallAllowCommands(firewalld) = %v, want 2 commands (add-service + reload)", firewalld)
+		t.Fatalf("buildFirewallAllowCommands(firewalld, 22) = %v, want 2 commands (add-service + reload)", firewalld)
 	}
 	if strings.Join(firewalld[0], " ") != "firewall-cmd --permanent --add-service=ssh" {
-		t.Errorf("buildFirewallAllowCommands(firewalld)[0] = %v", firewalld[0])
+		t.Errorf("buildFirewallAllowCommands(firewalld, 22)[0] = %v", firewalld[0])
 	}
 	if strings.Join(firewalld[1], " ") != "firewall-cmd --reload" {
-		t.Errorf("buildFirewallAllowCommands(firewalld)[1] = %v", firewalld[1])
+		t.Errorf("buildFirewallAllowCommands(firewalld, 22)[1] = %v", firewalld[1])
 	}
 
-	if got := buildFirewallAllowCommands("unknown"); got != nil {
-		t.Errorf("buildFirewallAllowCommands(unknown) = %v, want nil", got)
+	firewalldCustom := buildFirewallAllowCommands("firewalld", 2222)
+	if len(firewalldCustom) != 2 || strings.Join(firewalldCustom[0], " ") != "firewall-cmd --permanent --add-port=2222/tcp" {
+		t.Errorf("buildFirewallAllowCommands(firewalld, 2222) = %v, want --add-port=2222/tcp as the first command", firewalldCustom)
+	}
+
+	if got := buildFirewallAllowCommands("unknown", 22); got != nil {
+		t.Errorf("buildFirewallAllowCommands(unknown, 22) = %v, want nil", got)
+	}
+}
+
+func TestBuildFirewallRemoveCommands(t *testing.T) {
+	ufw := buildFirewallRemoveCommands("ufw", 22)
+	if len(ufw) != 1 || strings.Join(ufw[0], " ") != "ufw delete allow OpenSSH" {
+		t.Errorf("buildFirewallRemoveCommands(ufw, 22) = %v, want [[ufw delete allow OpenSSH]]", ufw)
+	}
+
+	ufwCustom := buildFirewallRemoveCommands("ufw", 2222)
+	if len(ufwCustom) != 1 || strings.Join(ufwCustom[0], " ") != "ufw delete allow 2222/tcp" {
+		t.Errorf("buildFirewallRemoveCommands(ufw, 2222) = %v, want [[ufw delete allow 2222/tcp]]", ufwCustom)
+	}
+
+	firewalld := buildFirewallRemoveCommands("firewalld", 22)
+	if len(firewalld) != 2 || strings.Join(firewalld[0], " ") != "firewall-cmd --permanent --remove-service=ssh" {
+		t.Errorf("buildFirewallRemoveCommands(firewalld, 22) = %v, want --remove-service=ssh as the first command", firewalld)
+	}
+
+	firewalldCustom := buildFirewallRemoveCommands("firewalld", 2222)
+	if len(firewalldCustom) != 2 || strings.Join(firewalldCustom[0], " ") != "firewall-cmd --permanent --remove-port=2222/tcp" {
+		t.Errorf("buildFirewallRemoveCommands(firewalld, 2222) = %v, want --remove-port=2222/tcp as the first command", firewalldCustom)
+	}
+
+	if got := buildFirewallRemoveCommands("unknown", 22); got != nil {
+		t.Errorf("buildFirewallRemoveCommands(unknown, 22) = %v, want nil", got)
+	}
+}
+
+func TestParseFirewalldPortsOutput(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		port   int
+		want   bool
+	}{
+		{"exact match", "2222/tcp 8080/tcp\n", 2222, true},
+		{"no match", "8080/tcp\n", 2222, false},
+		{"empty output", "", 2222, false},
+		{"does not match the standard port by itself", "2222/tcp\n", 22, false},
+	}
+	for _, c := range cases {
+		if got := parseFirewalldPortsOutput(c.output, c.port); got != c.want {
+			t.Errorf("%s: parseFirewalldPortsOutput(%q, %d) = %v, want %v", c.name, c.output, c.port, got, c.want)
+		}
 	}
 }
 

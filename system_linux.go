@@ -1155,13 +1155,23 @@ func detectLinuxFirewallTool(exists func(string) bool) string {
 	return ""
 }
 
+// defaultLinuxSSHPort is used only when the real listening port could
+// not be confirmed -- see sshPortOrFallback (system_common.go).
+const defaultLinuxSSHPort = 22
+
 // parseUfwStatusOutput parses `ufw status` output into whether ufw is
-// active at all, and whether it already has a rule allowing SSH (either
-// the named "OpenSSH" profile or a literal "22/tcp" rule).
-func parseUfwStatusOutput(output string) (active, allowsSSH bool) {
+// active at all, and whether it already has a rule allowing the given
+// port: either a literal "<port>/tcp" rule, or -- only when port is the
+// standard 22 -- ufw's named "OpenSSH" profile, which always means port
+// 22 and nothing else.
+func parseUfwStatusOutput(output string, port int) (active, allowsSSH bool) {
 	active = strings.Contains(output, "Status: active")
 	lower := strings.ToLower(output)
-	allowsSSH = strings.Contains(lower, "openssh") || strings.Contains(lower, "22/tcp")
+	portRule := strconv.Itoa(port) + "/tcp"
+	allowsSSH = strings.Contains(lower, portRule)
+	if port == defaultLinuxSSHPort {
+		allowsSSH = allowsSSH || strings.Contains(lower, "openssh")
+	}
 	return active, allowsSSH
 }
 
@@ -1172,7 +1182,8 @@ func parseFirewalldStateOutput(output string) bool {
 }
 
 // parseFirewalldServicesOutput reports whether "ssh" appears in
-// `firewall-cmd --list-services`' space-separated output.
+// `firewall-cmd --list-services`' space-separated output. "ssh" is
+// firewalld's named service definition and always means port 22.
 func parseFirewalldServicesOutput(output string) bool {
 	for _, svc := range strings.Fields(output) {
 		if svc == "ssh" {
@@ -1182,17 +1193,70 @@ func parseFirewalldServicesOutput(output string) bool {
 	return false
 }
 
+// parseFirewalldPortsOutput reports whether "<port>/tcp" appears in
+// `firewall-cmd --list-ports`' space-separated output -- the check
+// needed for any SSH port other than the standard 22, which the named
+// "ssh" service (parseFirewalldServicesOutput) doesn't cover.
+func parseFirewalldPortsOutput(output string, port int) bool {
+	want := strconv.Itoa(port) + "/tcp"
+	for _, p := range strings.Fields(output) {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
 // buildFirewallAllowCommands returns the argv command(s) that add an SSH
-// allow rule for the given firewall tool, in the order they must run.
-// firewalld needs a separate --reload to apply a --permanent change; ufw
-// does not.
-func buildFirewallAllowCommands(tool string) [][]string {
+// allow rule for the given firewall tool and port, in the order they
+// must run. firewalld needs a separate --reload to apply a --permanent
+// change; ufw does not. port is expected to already be validated
+// (1-65535, via sshPortOrFallback) -- strconv.Itoa on it can only ever
+// produce ASCII digits, so embedding it in a flag string here carries no
+// injection risk regardless.
+func buildFirewallAllowCommands(tool string, port int) [][]string {
 	switch tool {
 	case "ufw":
-		return [][]string{{"ufw", "allow", "OpenSSH"}}
+		if port == defaultLinuxSSHPort {
+			return [][]string{{"ufw", "allow", "OpenSSH"}}
+		}
+		return [][]string{{"ufw", "allow", strconv.Itoa(port) + "/tcp"}}
 	case "firewalld":
+		if port == defaultLinuxSSHPort {
+			return [][]string{
+				{"firewall-cmd", "--permanent", "--add-service=ssh"},
+				{"firewall-cmd", "--reload"},
+			}
+		}
 		return [][]string{
-			{"firewall-cmd", "--permanent", "--add-service=ssh"},
+			{"firewall-cmd", "--permanent", "--add-port=" + strconv.Itoa(port) + "/tcp"},
+			{"firewall-cmd", "--reload"},
+		}
+	default:
+		return nil
+	}
+}
+
+// buildFirewallRemoveCommands is buildFirewallAllowCommands' inverse,
+// used only to remove a rule this tool itself created (see
+// sshFirewallRuleRecordFile in system_common.go) -- never called on a
+// rule that was already there before this tool touched the firewall.
+func buildFirewallRemoveCommands(tool string, port int) [][]string {
+	switch tool {
+	case "ufw":
+		if port == defaultLinuxSSHPort {
+			return [][]string{{"ufw", "delete", "allow", "OpenSSH"}}
+		}
+		return [][]string{{"ufw", "delete", "allow", strconv.Itoa(port) + "/tcp"}}
+	case "firewalld":
+		if port == defaultLinuxSSHPort {
+			return [][]string{
+				{"firewall-cmd", "--permanent", "--remove-service=ssh"},
+				{"firewall-cmd", "--reload"},
+			}
+		}
+		return [][]string{
+			{"firewall-cmd", "--permanent", "--remove-port=" + strconv.Itoa(port) + "/tcp"},
 			{"firewall-cmd", "--reload"},
 		}
 	default:
@@ -1239,20 +1303,42 @@ func getSSHServerStatus() (SSHServerStatus, error) {
 		}
 	}
 
+	// The firewall checks below must ask about the SSH server's real
+	// port, never a hardcoded 22 -- fall back only when it genuinely
+	// couldn't be confirmed above, and say so.
+	checkPort, usedFallback := sshPortOrFallback(status.ListeningPort, defaultLinuxSSHPort)
+	if usedFallback {
+		note := fmt.Sprintf("Could not confirm the real listening port; firewall status below is checked against the default port %d.", defaultLinuxSSHPort)
+		if status.Detail == "" {
+			status.Detail = note
+		} else {
+			status.Detail += " " + note
+		}
+	}
+
 	status.FirewallTool = detectLinuxFirewallTool(commandExists)
 	switch status.FirewallTool {
 	case "ufw":
 		if out, err := runCommand("ufw", "status"); err == nil {
-			status.FirewallActive, status.FirewallAllowsSSH = parseUfwStatusOutput(out)
+			status.FirewallActive, status.FirewallAllowsSSH = parseUfwStatusOutput(out, checkPort)
 		}
 	case "firewalld":
 		if out, err := runCommand("firewall-cmd", "--state"); err == nil {
 			status.FirewallActive = parseFirewalldStateOutput(out)
 		}
 		if status.FirewallActive {
-			if out, err := runCommand("firewall-cmd", "--list-services"); err == nil {
-				status.FirewallAllowsSSH = parseFirewalldServicesOutput(out)
+			allows := false
+			if checkPort == defaultLinuxSSHPort {
+				if out, err := runCommand("firewall-cmd", "--list-services"); err == nil {
+					allows = parseFirewalldServicesOutput(out)
+				}
 			}
+			if !allows {
+				if out, err := runCommand("firewall-cmd", "--list-ports"); err == nil {
+					allows = parseFirewalldPortsOutput(out, checkPort)
+				}
+			}
+			status.FirewallAllowsSSH = allows
 		}
 	}
 
@@ -1341,17 +1427,74 @@ func disableSSHServer() (string, error) {
 	return "SSH server disabled (stopped, and will not start on boot). The openssh-server package itself was left installed.", nil
 }
 
-func ensureFirewallAllowsSSH() (string, error) {
+func ensureFirewallAllowsSSH(port int) (string, error) {
+	validPort, usedFallback := sshPortOrFallback(port, defaultLinuxSSHPort)
+
 	tool := detectLinuxFirewallTool(commandExists)
 	if tool == "" {
 		return "No supported firewall tool (ufw/firewalld) was detected -- nothing to change.", nil
 	}
 
-	for _, args := range buildFirewallAllowCommands(tool) {
+	var note string
+	if usedFallback {
+		note = fmt.Sprintf(" (could not confirm the real listening port, so the firewall was opened for the default port %d instead)", defaultLinuxSSHPort)
+	}
+
+	alreadyAllowed := false
+	switch tool {
+	case "ufw":
+		if out, err := runCommand("ufw", "status"); err == nil {
+			_, alreadyAllowed = parseUfwStatusOutput(out, validPort)
+		}
+	case "firewalld":
+		if validPort == defaultLinuxSSHPort {
+			if out, err := runCommand("firewall-cmd", "--list-services"); err == nil {
+				alreadyAllowed = parseFirewalldServicesOutput(out)
+			}
+		}
+		if !alreadyAllowed {
+			if out, err := runCommand("firewall-cmd", "--list-ports"); err == nil {
+				alreadyAllowed = parseFirewalldPortsOutput(out, validPort)
+			}
+		}
+	}
+
+	if alreadyAllowed {
+		return fmt.Sprintf("%s already allows SSH on port %d -- nothing to change.%s", tool, validPort, note), nil
+	}
+
+	for _, args := range buildFirewallAllowCommands(tool, validPort) {
 		if out, err := runCommand(args[0], args[1:]...); err != nil {
 			return "", fmt.Errorf("failed to run `%s`: %w\n%s", strings.Join(args, " "), err, out)
 		}
 	}
 
-	return fmt.Sprintf("Firewall rule added: %s now allows SSH.", tool), nil
+	// Only remember this as "ours" because we just created it -- a rule
+	// that was already there above is never recorded, so disable can
+	// never remove something this tool didn't create.
+	saveSSHFirewallRuleRecord(tool, validPort)
+
+	return fmt.Sprintf("Firewall rule added: %s now allows SSH on port %d.%s", tool, validPort, note), nil
+}
+
+// removeSSHFirewallRule removes exactly the firewall rule
+// ensureFirewallAllowsSSH itself created (tracked via
+// sshFirewallRuleRecordFile in system_common.go), and nothing else. If
+// no record exists -- this tool never created a rule, or the firewall
+// already allowed SSH before it looked -- this is a no-op.
+func removeSSHFirewallRule() (string, error) {
+	tool, port, ok := getSSHFirewallRuleRecord()
+	if !ok {
+		return "No firewall rule was created by this tool -- nothing to remove.", nil
+	}
+
+	for _, args := range buildFirewallRemoveCommands(tool, port) {
+		if out, err := runCommand(args[0], args[1:]...); err != nil {
+			return "", fmt.Errorf("failed to run `%s`: %w\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	removeSSHFirewallRuleRecord()
+
+	return fmt.Sprintf("Firewall rule for port %d (added by this tool via %s) removed.", port, tool), nil
 }

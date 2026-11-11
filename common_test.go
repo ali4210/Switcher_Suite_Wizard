@@ -1178,3 +1178,72 @@ func TestSelectMainMenuWraparoundMatchesItemCount(t *testing.T) {
 		t.Errorf("menuMoveDown(%d, %d) = %d, want 0 (pressing Down from Exit must wrap back to the first item)", exitIndex, itemCount, got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SSH Server firewall port validation and rule-ownership record (N11)
+// ---------------------------------------------------------------------------
+
+func TestSSHPortOrFallback(t *testing.T) {
+	cases := []struct {
+		name         string
+		port         int
+		fallback     int
+		wantPort     int
+		wantFallback bool
+	}{
+		{"valid standard port", 22, 22, 22, false},
+		{"valid custom port", 2222, 22, 2222, false},
+		{"lowest valid port", 1, 22, 1, false},
+		{"highest valid port", 65535, 22, 65535, false},
+		{"zero (not detected) falls back", 0, 22, 22, true},
+		{"negative falls back", -1, 22, 22, true},
+		{"over 65535 falls back", 65536, 22, 22, true},
+		{"falls back to whatever fallback the caller passed, not a hardcoded 22", 0, 2200, 2200, true},
+	}
+	for _, c := range cases {
+		port, usedFallback := sshPortOrFallback(c.port, c.fallback)
+		if port != c.wantPort || usedFallback != c.wantFallback {
+			t.Errorf("%s: sshPortOrFallback(%d, %d) = (%d, %v), want (%d, %v)", c.name, c.port, c.fallback, port, usedFallback, c.wantPort, c.wantFallback)
+		}
+	}
+}
+
+func TestSSHFirewallRuleRecordRoundTrip(t *testing.T) {
+	withTempCWD(t)
+
+	if _, _, ok := getSSHFirewallRuleRecord(); ok {
+		t.Error("getSSHFirewallRuleRecord() with no record = ok, want not ok")
+	}
+
+	saveSSHFirewallRuleRecord("ufw", 2222)
+	tool, port, ok := getSSHFirewallRuleRecord()
+	if !ok || tool != "ufw" || port != 2222 {
+		t.Errorf(`getSSHFirewallRuleRecord() = (%q, %d, %v), want ("ufw", 2222, true)`, tool, port, ok)
+	}
+
+	removeSSHFirewallRuleRecord()
+	if _, _, ok := getSSHFirewallRuleRecord(); ok {
+		t.Error("getSSHFirewallRuleRecord() after remove = ok, want not ok")
+	}
+}
+
+func TestSSHFirewallRuleRecordRejectsCorruptContent(t *testing.T) {
+	withTempCWD(t)
+
+	cases := []string{
+		"",
+		"ufw",                // missing port
+		"ufw not-a-number",   // non-numeric port
+		"ufw 0",              // out of range (too low)
+		"ufw 65536",          // out of range (too high)
+		"ufw 22 extra-field", // too many fields
+	}
+	for _, content := range cases {
+		if err := os.WriteFile(sshFirewallRuleRecordFile, []byte(content), 0644); err != nil {
+			t.Fatalf("test setup: could not write record file: %v", err)
+		}
+		if _, _, ok := getSSHFirewallRuleRecord(); ok {
+			t.Errorf("getSSHFirewallRuleRecord() with content %q = ok, want not ok (corrupt/foreign record must never be acted on)", content)
+		}
+	}
+}

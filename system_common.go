@@ -744,6 +744,55 @@ func sshServerNeedsFirewallPrompt(status SSHServerStatus) bool {
 	return status.FirewallTool != "" && status.FirewallActive && !status.FirewallAllowsSSH
 }
 
+// sshPortOrFallback validates port as a real TCP port (1-65535); if it's
+// not (typically 0, meaning the real listening port could not be
+// confirmed), returns fallback (each OS's own standard SSH port
+// constant) and true, so callers can tell the user a fallback was used
+// instead of silently acting on an unconfirmed port.
+func sshPortOrFallback(port, fallback int) (validPort int, usedFallback bool) {
+	if port >= 1 && port <= 65535 {
+		return port, false
+	}
+	return fallback, true
+}
+
+// sshFirewallRuleRecordFile remembers which firewall rule (if any) THIS
+// tool created for the SSH server, so disabling it later can remove
+// exactly that rule and never a rule that already existed before this
+// tool touched the firewall (e.g. one created by the OS itself, or by
+// the user). Written only on a successful NEW rule creation -- never
+// when ensureFirewallAllowsSSH finds a matching rule already in place.
+const sshFirewallRuleRecordFile = ".switcher_ssh_firewall_rule"
+
+func saveSSHFirewallRuleRecord(tool string, port int) {
+	_ = os.WriteFile(sshFirewallRuleRecordFile, []byte(fmt.Sprintf("%s %d", tool, port)), 0644)
+}
+
+// getSSHFirewallRuleRecord reads back the record saved by
+// saveSSHFirewallRuleRecord. ok is false if no record exists, or if its
+// content doesn't parse as "<tool> <port 1-65535>" -- a corrupt/foreign
+// record is treated as "we don't know we created anything", never as
+// license to remove an arbitrary rule.
+func getSSHFirewallRuleRecord() (tool string, port int, ok bool) {
+	data, err := os.ReadFile(sshFirewallRuleRecordFile)
+	if err != nil {
+		return "", 0, false
+	}
+	fields := strings.Fields(strings.TrimSpace(string(data)))
+	if len(fields) != 2 {
+		return "", 0, false
+	}
+	p, err := strconv.Atoi(fields[1])
+	if err != nil || p < 1 || p > 65535 {
+		return "", 0, false
+	}
+	return fields[0], p, true
+}
+
+func removeSSHFirewallRuleRecord() {
+	_ = os.Remove(sshFirewallRuleRecordFile)
+}
+
 func yesNo(b bool) string {
 	if b {
 		return "Yes"
@@ -859,7 +908,7 @@ func sshServerEnableFlow(status SSHServerStatus) {
 		printBoxBlankRow("\n")
 		printBoxRow(" "+FgAmber+Bold+"[!] "+newStatus.FirewallTool+" is active and does not currently allow SSH."+Reset, "\n")
 		if confirmAction("Allow SSH through " + newStatus.FirewallTool + " now?") {
-			fwRes, fwErr := ensureFirewallAllowsSSH()
+			fwRes, fwErr := ensureFirewallAllowsSSH(newStatus.ListeningPort)
 			if fwErr != nil {
 				printBoxRow(" "+FgRose+"[!] Firewall error: "+fwErr.Error()+Reset, "\n")
 			} else {
@@ -915,8 +964,16 @@ func sshServerDisableFlow(status SSHServerStatus) {
 	res, err := disableSSHServer()
 	if err != nil {
 		printBoxRow(" "+FgRose+"[!] Error: "+err.Error()+Reset, "\n")
+		pauseAction()
+		return
+	}
+	printBoxRow(" "+FgEmerald+"[✓] "+res+Reset, "\n")
+
+	fwRes, fwErr := removeSSHFirewallRule()
+	if fwErr != nil {
+		printBoxRow(" "+FgRose+"[!] Firewall cleanup error: "+fwErr.Error()+Reset, "\n")
 	} else {
-		printBoxRow(" "+FgEmerald+"[✓] "+res+Reset, "\n")
+		printBoxRow(" "+FgCyan+"[i] "+fwRes+Reset, "\n")
 	}
 	pauseAction()
 }

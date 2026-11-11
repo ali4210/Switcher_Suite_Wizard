@@ -667,6 +667,10 @@ func disableSSHServer() (string, error) {
 	return "SSH server (Remote Login) disabled.", nil
 }
 
-func ensureFirewallAllowsSSH() (string, error) {
+func ensureFirewallAllowsSSH(port int) (string, error) {
 	return "macOS does not require a separate firewall exception for Remote Login -- it is a system service, not an application the firewall would otherwise block.", nil
+}
+
+func removeSSHFirewallRule() (string, error) {
+	return "macOS does not manage a separate firewall rule for Remote Login -- nothing to remove.", nil
 }
