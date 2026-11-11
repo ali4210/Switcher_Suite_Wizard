@@ -29,11 +29,86 @@ func setSystemHostname(newName string) (string, error) {
 	_ = os.WriteFile("/etc/hostname", []byte(newName+"\n"), 0644)
 	_ = exec.Command("hostname", newName).Run()
 
-	// Automatically patch /etc/hosts with new hostname
-	hostsData := fmt.Sprintf("127.0.0.1\tlocalhost %s\n::1\t\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n", newName, newName)
-	_ = os.WriteFile("/etc/hosts", []byte(hostsData), 0644)
+	// Merge the new hostname into /etc/hosts instead of overwriting it
+	syncLinuxHostsFile(newName)
 
 	return fmt.Sprintf("Hostname permanently set to '%s' (updated /etc/hostname, /etc/hosts, and live kernel).", newName), nil
+}
+
+// backupHostsFile preserves the pre-change contents of /etc/hosts so a bad
+// merge can be undone manually.
+func backupHostsFile() {
+	data, err := os.ReadFile("/etc/hosts")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile("/etc/hosts.switcher.bak", data, 0644)
+}
+
+// syncLinuxHostsFile backs up /etc/hosts, then merges the given hostname
+// into its Debian-style 127.0.1.1 line instead of truncating the whole file
+// (which previously destroyed any custom entries such as Docker or local
+// dev domains). The localhost/::1 lines are preserved as-is.
+func syncLinuxHostsFile(hostname string) {
+	backupHostsFile()
+
+	data, err := os.ReadFile("/etc/hosts")
+	if err != nil {
+		hostsData := fmt.Sprintf("127.0.0.1\tlocalhost\n::1\t\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n", hostname)
+		_ = os.WriteFile("/etc/hosts", []byte(hostsData), 0644)
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var newLines []string
+	wroteHostnameLine := false
+	hasLocalhostLine := false
+	hasIPv6LocalhostLine := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "127.0.1.1"):
+			newLines = append(newLines, "127.0.1.1\t"+hostname)
+			wroteHostnameLine = true
+		case strings.HasPrefix(trimmed, "127.0.0.1"):
+			hasLocalhostLine = true
+			newLines = append(newLines, line)
+		case strings.HasPrefix(trimmed, "::1"):
+			hasIPv6LocalhostLine = true
+			newLines = append(newLines, line)
+		default:
+			newLines = append(newLines, line)
+		}
+	}
+
+	if !hasLocalhostLine {
+		newLines = append([]string{"127.0.0.1\tlocalhost"}, newLines...)
+	}
+	if !hasIPv6LocalhostLine {
+		newLines = append(newLines, "::1\t\tlocalhost ip6-localhost ip6-loopback")
+	}
+	if !wroteHostnameLine {
+		newLines = append(newLines, "127.0.1.1\t"+hostname)
+	}
+
+	_ = os.WriteFile("/etc/hosts", []byte(strings.Join(newLines, "\n")), 0644)
+}
+
+// isSystemdResolvedManaged reports whether /etc/resolv.conf is owned by
+// systemd-resolved, in which case writing it directly is silently reverted
+// and resolvectl must be used instead.
+func isSystemdResolvedManaged() bool {
+	if target, err := os.Readlink("/etc/resolv.conf"); err == nil && strings.Contains(target, "systemd") {
+		return true
+	}
+	_, err := os.Stat("/run/systemd/resolve/resolv.conf")
+	return err == nil
+}
+
+func applyResolvedDNS(iface string, servers []string) (string, error) {
+	args := append([]string{"dns", iface}, servers...)
+	return runCommand("resolvectl", args...)
 }
 
 func getInterfaceIPAddresses(iface string) []string {
@@ -299,11 +374,15 @@ func setDNS(iface string, servers []string, automatic bool) string {
 	_ = reactivateNetworkManagerConnection(connection)
 
 	if !automatic && len(servers) > 0 {
-		var buf strings.Builder
-		for _, s := range servers {
-			buf.WriteString("nameserver " + s + "\n")
+		if isSystemdResolvedManaged() {
+			_, _ = applyResolvedDNS(iface, servers)
+		} else {
+			var buf strings.Builder
+			for _, s := range servers {
+				buf.WriteString("nameserver " + s + "\n")
+			}
+			_ = os.WriteFile("/etc/resolv.conf", []byte(buf.String()), 0644)
 		}
-		_ = os.WriteFile("/etc/resolv.conf", []byte(buf.String()), 0644)
 	}
 
 	return Green + "[✓] " + successMessage + NC
@@ -755,9 +834,8 @@ func runNetworkTroubleshooter() []DiagnosticStep {
 		step1.Passed = false
 		step1.Details = fmt.Sprintf("Hostname '%s' missing from /etc/hosts (causes sudo lag and lookup errors).", hostname)
 
-		fixedHosts := fmt.Sprintf("127.0.0.1\tlocalhost %s\n::1\t\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n", hostname, hostname)
-		_ = os.WriteFile("/etc/hosts", []byte(fixedHosts), 0644)
-		step1.FixLog = "Injected active hostname '" + hostname + "' into /etc/hosts."
+		syncLinuxHostsFile(hostname)
+		step1.FixLog = "Merged active hostname '" + hostname + "' into /etc/hosts (backup at /etc/hosts.switcher.bak)."
 	} else {
 		step1.Passed = true
 		step1.Details = "Hostname '" + hostname + "' correctly mapped to 127.0.0.1."
@@ -824,9 +902,14 @@ func runNetworkTroubleshooter() []DiagnosticStep {
 		step4.Passed = false
 		step4.Details = "Resolvers missing or port 53 queries failing."
 
-		fallbackResolv := "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 192.168.0.1\n"
-		_ = os.WriteFile("/etc/resolv.conf", []byte(fallbackResolv), 0644)
-		step4.FixLog = "Wrote fallback public & router DNS servers to /etc/resolv.conf."
+		if isSystemdResolvedManaged() {
+			_, _ = applyResolvedDNS(primaryIface, []string{"1.1.1.1", "8.8.8.8", "192.168.0.1"})
+			step4.FixLog = "Applied fallback DNS via resolvectl (systemd-resolved detected)."
+		} else {
+			fallbackResolv := "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 192.168.0.1\n"
+			_ = os.WriteFile("/etc/resolv.conf", []byte(fallbackResolv), 0644)
+			step4.FixLog = "Wrote fallback public & router DNS servers to /etc/resolv.conf."
+		}
 		steps = append(steps, step4)
 	} else {
 		step4 := DiagnosticStep{Name: "DNS Configuration (/etc/resolv.conf)"}
