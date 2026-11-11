@@ -487,6 +487,65 @@ func TestParseUfwStatusOutput(t *testing.T) {
 			wantActive:    true,
 			wantAllowsSSH: false,
 		},
+		{
+			// Regression test: "2222/tcp" contains "22/tcp" as a plain
+			// substring. A naive strings.Contains check would wrongly
+			// report port 22 as allowed here.
+			name: "active, 2222/tcp rule present -- must NOT count as port 22 (substring false-positive)",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"2222/tcp                   ALLOW       Anywhere\n",
+			port:          22,
+			wantActive:    true,
+			wantAllowsSSH: false,
+		},
+		{
+			// Same substring trap from the other side: "122/tcp" also
+			// contains "22/tcp".
+			name: "active, 122/tcp rule present -- must NOT count as port 22 (substring false-positive)",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"122/tcp                    ALLOW       Anywhere\n",
+			port:          22,
+			wantActive:    true,
+			wantAllowsSSH: false,
+		},
+		{
+			// Checking port 2222 must not be fooled by 22/tcp or 122/tcp
+			// rules either -- confirms the match is symmetric, not just
+			// a one-sided "don't match 22 inside a longer number" fix.
+			name: "active, 22/tcp and 122/tcp rules present -- must NOT count as port 2222",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"22/tcp                     ALLOW       Anywhere\n" +
+				"122/tcp                    ALLOW       Anywhere\n",
+			port:          2222,
+			wantActive:    true,
+			wantAllowsSSH: false,
+		},
+		{
+			name: "active, IPv6 variant of the literal port rule (ufw's '(v6)' suffix)",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"22/tcp (v6)                ALLOW       Anywhere (v6)\n",
+			port:          22,
+			wantActive:    true,
+			wantAllowsSSH: true,
+		},
+		{
+			name: "active, IPv6 variant of the named OpenSSH profile",
+			output: "Status: active\n\n" +
+				"To                         Action      From\n" +
+				"--                         ------      ----\n" +
+				"OpenSSH (v6)               ALLOW       Anywhere (v6)\n",
+			port:          22,
+			wantActive:    true,
+			wantAllowsSSH: true,
+		},
 	}
 	for _, c := range cases {
 		active, allowsSSH := parseUfwStatusOutput(c.output, c.port)

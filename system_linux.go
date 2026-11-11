@@ -1164,13 +1164,31 @@ const defaultLinuxSSHPort = 22
 // port: either a literal "<port>/tcp" rule, or -- only when port is the
 // standard 22 -- ufw's named "OpenSSH" profile, which always means port
 // 22 and nothing else.
+//
+// Matches the "To" column as a whole token, never a substring: a plain
+// strings.Contains(output, "22/tcp") would also match inside "2222/tcp"
+// or "122/tcp", wrongly reporting port 22 as allowed because of a
+// completely different rule. Splitting each line on whitespace and
+// comparing the first field exactly avoids that, and also handles
+// ufw's "22/tcp (v6)" / "OpenSSH (v6)" IPv6 variants correctly, since
+// "(v6)" is always its own separate field after the real token.
 func parseUfwStatusOutput(output string, port int) (active, allowsSSH bool) {
 	active = strings.Contains(output, "Status: active")
-	lower := strings.ToLower(output)
 	portRule := strconv.Itoa(port) + "/tcp"
-	allowsSSH = strings.Contains(lower, portRule)
-	if port == defaultLinuxSSHPort {
-		allowsSSH = allowsSSH || strings.Contains(lower, "openssh")
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		to := fields[0]
+		if strings.EqualFold(to, portRule) {
+			allowsSSH = true
+			break
+		}
+		if port == defaultLinuxSSHPort && strings.EqualFold(to, "OpenSSH") {
+			allowsSSH = true
+			break
+		}
 	}
 	return active, allowsSSH
 }

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -762,10 +763,42 @@ func sshPortOrFallback(port, fallback int) (validPort int, usedFallback bool) {
 // tool touched the firewall (e.g. one created by the OS itself, or by
 // the user). Written only on a successful NEW rule creation -- never
 // when ensureFirewallAllowsSSH finds a matching rule already in place.
-const sshFirewallRuleRecordFile = ".switcher_ssh_firewall_rule"
+//
+// Deliberately NOT a relative path in the current working directory:
+// this feature always runs elevated, and this project's own CWD during
+// normal use is the repo checkout itself (`sudo ./Switcher_Suite_Wizard`
+// run from inside it) -- a relative path would leave a root-owned
+// dotfile sitting in the repo folder. sshFirewallRuleRecordPath instead
+// resolves a fixed, OS-appropriate system location, unrelated to
+// wherever the binary happens to be invoked from.
+const sshFirewallRuleRecordFile = "ssh_firewall_rule.state"
+
+// sshFirewallRuleStateDir is the fixed directory sshFirewallRuleRecordFile
+// lives in: ProgramData on Windows (parallel to windowsSSHDConfigPath's
+// own use of it for sshd_config), /etc on Linux/macOS -- both are the
+// standard system-wide location for state belonging to a feature that
+// already requires root/Administrator to touch at all.
+func sshFirewallRuleStateDir() string {
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			return filepath.Join(pd, "SwitcherSuiteWizard")
+		}
+		return `C:\ProgramData\SwitcherSuiteWizard`
+	}
+	return "/etc/switcher-suite-wizard"
+}
+
+// sshFirewallRuleRecordPath is a var, not a plain function call, so
+// tests can override it to point inside a temp directory instead of the
+// real fixed system path above.
+var sshFirewallRuleRecordPath = func() string {
+	return filepath.Join(sshFirewallRuleStateDir(), sshFirewallRuleRecordFile)
+}
 
 func saveSSHFirewallRuleRecord(tool string, port int) {
-	_ = os.WriteFile(sshFirewallRuleRecordFile, []byte(fmt.Sprintf("%s %d", tool, port)), 0644)
+	path := sshFirewallRuleRecordPath()
+	_ = os.MkdirAll(filepath.Dir(path), 0700)
+	_ = os.WriteFile(path, []byte(fmt.Sprintf("%s %d", tool, port)), 0600)
 }
 
 // getSSHFirewallRuleRecord reads back the record saved by
@@ -774,7 +807,7 @@ func saveSSHFirewallRuleRecord(tool string, port int) {
 // record is treated as "we don't know we created anything", never as
 // license to remove an arbitrary rule.
 func getSSHFirewallRuleRecord() (tool string, port int, ok bool) {
-	data, err := os.ReadFile(sshFirewallRuleRecordFile)
+	data, err := os.ReadFile(sshFirewallRuleRecordPath())
 	if err != nil {
 		return "", 0, false
 	}
@@ -790,7 +823,7 @@ func getSSHFirewallRuleRecord() (tool string, port int, ok bool) {
 }
 
 func removeSSHFirewallRuleRecord() {
-	_ = os.Remove(sshFirewallRuleRecordFile)
+	_ = os.Remove(sshFirewallRuleRecordPath())
 }
 
 func yesNo(b bool) string {
