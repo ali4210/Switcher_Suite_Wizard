@@ -1320,3 +1320,46 @@ func TestSSHFirewallRuleRecordPathIsFixedSystemLocation(t *testing.T) {
 		t.Errorf("sshFirewallRuleRecordPath() = %q, want it to end in %q", path, sshFirewallRuleRecordFile)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// autorun.bat / autorun.ps1 Go bootstrap version fallback
+//
+// Both Windows launchers read the Go download version from go.mod's own
+// "go X.Y.Z" directive at run time, but each also keeps a hardcoded
+// fallback constant for when go.mod is missing or unparsable. This test
+// catches that fallback silently drifting away from go.mod's actual
+// requirement if go.mod is ever bumped without updating the launchers.
+// ---------------------------------------------------------------------------
+
+func TestWindowsLauncherBootstrapFallbackMatchesGoMod(t *testing.T) {
+	goModBytes, err := os.ReadFile("go.mod")
+	if err != nil {
+		t.Fatalf("reading go.mod: %v", err)
+	}
+	goModVersion := regexp.MustCompile(`(?m)^go (\d+\.\d+(?:\.\d+)?)`).FindStringSubmatch(string(goModBytes))
+	if goModVersion == nil {
+		t.Fatal(`go.mod has no "go X.Y.Z" directive`)
+	}
+	required := goModVersion[1]
+
+	cases := []struct {
+		file string
+		re   *regexp.Regexp
+	}{
+		{"autorun.bat", regexp.MustCompile(`set "GO_BOOTSTRAP_VERSION=(\d+\.\d+(?:\.\d+)?)"`)},
+		{"autorun.ps1", regexp.MustCompile(`\$GoBootstrapVersionFallback\s*=\s*"(\d+\.\d+(?:\.\d+)?)"`)},
+	}
+	for _, c := range cases {
+		data, err := os.ReadFile(c.file)
+		if err != nil {
+			t.Fatalf("reading %s: %v", c.file, err)
+		}
+		m := c.re.FindStringSubmatch(string(data))
+		if m == nil {
+			t.Fatalf("%s: could not find the bootstrap version fallback constant", c.file)
+		}
+		if m[1] != required {
+			t.Errorf("%s fallback bootstrap version is %q, but go.mod requires %q -- update the fallback to match", c.file, m[1], required)
+		}
+	}
+}
