@@ -1094,22 +1094,25 @@ func getSSHServerStatus() (SSHServerStatus, error) {
 	// The firewall check below must confirm the rule covers the SSH
 	// server's real port, never just assume any rule with the right
 	// Name is good enough -- fall back to 22 only when the real port
-	// genuinely couldn't be confirmed above, and say so.
+	// genuinely couldn't be confirmed above, and say so -- but only
+	// once we know the firewall is active (i.e. a port check will
+	// actually happen below), so the note is never shown when the
+	// firewall is off and no such check occurs at all.
 	checkPort, usedFallback := sshPortOrFallback(status.ListeningPort, defaultWindowsSSHPort)
-	if usedFallback {
-		note := fmt.Sprintf("Could not confirm the real listening port; firewall status below is checked against the default port %d.", defaultWindowsSSHPort)
-		if status.Detail == "" {
-			status.Detail = note
-		} else {
-			status.Detail += " " + note
-		}
-	}
 
 	status.FirewallTool = "Windows Defender Firewall"
 	if out, err := runWindowsPowerShell(buildWindowsFirewallEnabledScript()); err == nil {
 		status.FirewallActive = parseWindowsBoolOutput(out)
 	}
 	if status.FirewallActive {
+		if usedFallback {
+			note := fmt.Sprintf("Could not confirm the real listening port; firewall status below is checked against the default port %d.", defaultWindowsSSHPort)
+			if status.Detail == "" {
+				status.Detail = note
+			} else {
+				status.Detail += " " + note
+			}
+		}
 		if existsOut, err := runWindowsPowerShell(buildWindowsFirewallRuleExistsScript()); err == nil && parseWindowsBoolOutput(existsOut) {
 			if portOut, err := runWindowsPowerShell(buildWindowsFirewallRulePortScript()); err == nil {
 				if rulePort, ok := parseWindowsFirewallRulePortOutput(portOut); ok {

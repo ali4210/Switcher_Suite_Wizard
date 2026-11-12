@@ -98,10 +98,6 @@ function Leave-AltScreen {
     }
 }
 
-function Clear-InAltScreen {
-    Write-Host -NoNewline "$ESC[H$ESC[2J"
-}
-
 # Best-effort Ctrl+C handling: the native Windows mechanism for it
 # (CTRL_C_EVENT) is exactly what [Console]::CancelKeyPress intercepts,
 # but this cannot be exercised from this Linux environment (POSIX

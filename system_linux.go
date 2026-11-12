@@ -1345,9 +1345,14 @@ func getSSHServerStatus() (SSHServerStatus, error) {
 
 	// The firewall checks below must ask about the SSH server's real
 	// port, never a hardcoded 22 -- fall back only when it genuinely
-	// couldn't be confirmed above, and say so.
+	// couldn't be confirmed above, and say so -- but only once we know a
+	// firewall check will actually happen (status.FirewallTool != ""),
+	// so the note is never shown on a system with no supported firewall
+	// tool, where no such check occurs at all.
 	checkPort, usedFallback := sshPortOrFallback(status.ListeningPort, defaultLinuxSSHPort)
-	if usedFallback {
+
+	status.FirewallTool = detectLinuxFirewallTool(commandExists)
+	if usedFallback && status.FirewallTool != "" {
 		note := fmt.Sprintf("Could not confirm the real listening port; firewall status below is checked against the default port %d.", defaultLinuxSSHPort)
 		if status.Detail == "" {
 			status.Detail = note
@@ -1356,7 +1361,6 @@ func getSSHServerStatus() (SSHServerStatus, error) {
 		}
 	}
 
-	status.FirewallTool = detectLinuxFirewallTool(commandExists)
 	switch status.FirewallTool {
 	case "ufw":
 		if out, err := runCommand("ufw", "status"); err == nil {
