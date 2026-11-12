@@ -3,6 +3,8 @@
 /Switcher_Suite_Wizard_macOS
 /switcher
 /switcher.exe
+/.go_runtime/
+/.cache/
 /.switcher_cli_command
 /.switcher_previous_hostname
 /.switcher_default_hostname

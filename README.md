@@ -50,7 +50,7 @@ Built for developers, sysadmins, and network engineers who live in the terminal 
 > [!TIP]
 > **First run:**
 > - 🐧 **Linux/macOS:** `./autorun.sh -f` or `./autorun.sh --hard`
-> - 🪟 **Windows:** right-click `autorun.bat` → *Run as administrator*, or run `.\autorun.ps1`. Launching from an elevated terminal instead? Use `autorun.bat -f` or `autorun.bat --hard`.
+> - 🪟 **Windows:** right-click `autorun.bat` → *Run as administrator*, or run `.\autorun.ps1`. Launching from an elevated terminal instead? Use `.\autorun.bat -f` or `.\autorun.bat --hard`.
 >
 > The wrapper self-provisions a Go toolchain if it can't find one, compiles the binary, and launches it elevated — automatically. After the first run, plain `./autorun.sh` or `autorun.bat` is enough.
 
@@ -420,7 +420,7 @@ Each phase reports pass/fail with details, and every applied fix is logged inlin
 - Registers a system-wide command (default `switcher-wizard`, or any custom alias you choose)
 - Linux/macOS: writes a `sudo`-wrapped shim to `/usr/local/bin` (or `/opt/homebrew/bin`) plus a managed block in your shell profile(s)
 - Windows: adds the binary's directory to `PATH` and drops an auto-elevating `.cmd`/`.bat` shim into `System32`
-- **Collision protection**: a custom alias is checked against both a reserved-command list (`ssh`, `ls`, `sudo`, `systemctl`, `rm`, and ~40 others) and whatever already exists on disk/`PATH` at that name — a name that would overwrite a real command or an unrelated file is refused outright, never silently clobbered
+- **Collision protection**: a custom alias is checked against both a reserved-command list (`ssh`, `ls`, `sudo`, `systemctl`, `rm`, and ~62 others) and whatever already exists on disk/`PATH` at that name — a name that would overwrite a real command or an unrelated file is refused outright, never silently clobbered
 - **Legacy-shim recognition**: enable/disable can tell "a shim this tool created" apart from "something that was already there," including shims written by an older version of the tool, so re-enabling or disabling never mistakes a foreign file for its own
 - **Disable** cleanly removes the shim and strips the managed block from every profile it touched
 
@@ -598,29 +598,36 @@ An honest account of how each feature has actually been verified, not just what 
 | Feature | 🐧 Linux | 🪟 Windows | 🍎 macOS |
 |---|:-:|:-:|:-:|
 | Terminal alternate-screen / scrollback safety (`autorun.sh`) | ✅ Runtime-tested | n/a | ✅ Runtime-tested (same script) |
-| `autorun.ps1` alternate-screen / scrollback safety | n/a | 🟡 Script logic verified⁴, console rendering not | n/a |
-| `autorun.bat` history-safe clear | n/a | ⬜ Not tested⁵ (the `[!]`/delayed-expansion fix specifically, made after this run) | n/a |
-| Build wrapper (`autorun.sh` / `.bat` / `.ps1`) | ✅ Runtime-tested | ✅ Runtime-tested⁷ | 🟡 Unit-tested only¹ |
-| Main menu navigation & Global CLI collision checks | ✅ Runtime-tested (nav) + 🟡 unit-tested (collision logic) | 🟡 Unit tests executed for real⁷ (one failure found there, fixed here, not yet re-verified) | 🟡 Unit-tested only |
+| `autorun.ps1` alternate-screen / scrollback safety | n/a | 🟡 Script logic verified¹, console rendering not | n/a |
+| `autorun.bat` — `[!]` / delayed-expansion display fix | n/a | ✅ Runtime-tested² | n/a |
+| `autorun.bat` — history-safe screen clear | n/a | 🟡 Launch and return to the original terminal confirmed³; whether earlier console scrollback is preserved after the clear is **not** confirmed | n/a |
+| Line-ending normalization (`.gitattributes`: CRLF for `.bat`/`.ps1`) | n/a | ✅ Runtime-tested² | n/a |
+| Build wrapper (`autorun.sh`, Linux/macOS) | ✅ Runtime-tested | n/a | 🟡 Unit-tested only⁴ |
+| Build wrapper (`autorun.bat`, Windows) | n/a | ✅ Runtime-tested² | n/a |
+| Build wrapper (`autorun.ps1`, Windows) | n/a | ⬜ Not run on a real Windows host — verified only via `pwsh` on Linux¹ | n/a |
+| Main menu navigation & Global CLI collision-check logic | ✅ Runtime-tested (nav) + 🟡 unit-tested (collision logic) | ✅ Unit tests confirmed passing for real² (collision logic); interactive navigation itself not specifically exercised beyond launch/return | 🟡 Unit-tested only |
+| Global CLI Integration — enable/disable (writes a shim, modifies PATH/profile) | ⬜ Not tested⁵ | ⬜ Not tested⁵ | ⬜ Not tested⁵ |
 | `autorun.ps1` Auto-Detect host-platform logic | 🟡 Script logic verified via `pwsh`⁶ | 🟡 Script logic verified via `pwsh`⁶ | 🟡 Script logic verified via `pwsh`⁶ |
-| System Mode Switcher (GUI ↔ TTY/CLI) | ⬜ Not tested² | ⬜ Not tested² | n/a (not supported by design) |
-| Hostname Manager (set / rollback / `/etc/hosts` merge+backup) | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
-| IP Address Manager (incl. virtual-adapter filtering) | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
-| DNS Resolver Switcher | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
+| System Mode Switcher (GUI ↔ TTY/CLI) | ⬜ Not tested⁷ | ⬜ Not tested⁵ | n/a (not supported by design) |
+| Hostname Manager (set / rollback / `/etc/hosts` merge+backup) | ⬜ Not tested⁵ | ⬜ Not tested⁵ | ⬜ Not tested⁵ |
+| IP Address Manager (incl. virtual-adapter filtering) | ⬜ Not tested⁵ | ⬜ Not tested⁵ | ⬜ Not tested⁵ |
+| DNS Resolver Switcher | ⬜ Not tested⁵ | ⬜ Not tested⁵ | ⬜ Not tested⁵ |
 | Proxy Configuration (incl. IPv6 endpoint handling, WinHTTP read-back) | 🟡 Unit-tested only | 🟡 Unit-tested only | 🟡 Unit-tested only |
-| Automated Network Troubleshooter | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
+| Automated Network Troubleshooter | ⬜ Not tested⁵ | ⬜ Not tested⁵ | ⬜ Not tested⁵ |
 | SSH Server — status / idempotency decision | ✅ Runtime-tested (read-only) | 🟡 Unit-tested only | 🟡 Unit-tested only |
 | SSH Server — firewall rule targets the real port, not hardcoded 22 | 🟡 Unit-tested only | 🟡 Unit-tested only | n/a (no firewall step) |
-| SSH Server — install/enable/disable/firewall mutation | ⬜ Not tested³ | ⬜ Not tested³ | ⬜ Not tested³ |
-| Windows console buffer/window fallback-on-failure handling | n/a | ⬜ Not tested⁵ | n/a |
+| SSH Server — install/enable/disable/firewall mutation | ⬜ Not tested⁸ | ⬜ Not tested⁸ | ⬜ Not tested⁸ |
+| Windows console buffer/window fallback-on-failure handling | n/a | ⬜ Not tested⁹ | n/a |
 
-¹ Cross-compiles cleanly and `go vet`/`go test -c` type-check its OS-specific Go code; the shell/PowerShell script itself has only actually been *run* on Linux (`autorun.bat` has now also been run for real on Windows — see ⁷).
-² This engagement's safety rules forbade making real install/enable/service/network changes on the machine used for development — every mutating feature has solid input-validation unit tests, but the feature as a whole has not been exercised against a live system since the original audit that preceded this work.
-³ Deliberately never executed anywhere, including on Linux where the menu itself was runtime-tested — every confirmation prompt was reached and cancelled, never confirmed. See the manual VM checklist in this repo's own change history for the exact steps to runtime-verify it.
-⁴ Run end-to-end with the cross-platform `pwsh` available in this (Linux) development environment, under a real PTY: the PowerShell parser reported 0 syntax errors, `exit` inside `try` was confirmed to still run `finally` (and preserve the exit code), and the captured output showed exactly one alternate-screen enter and exit sequence, in the right order, around the menu's cancel path. What that genuinely confirms: the script's own control flow and the bytes it emits are correct. What it cannot confirm: whether a real Windows `conhost`/Windows Terminal actually renders `\x1b[?1049h`/`l` as true alternate-screen switching — no Windows host was available in this engagement.
-⁵ No `cmd.exe` interpreter is available in the primary (Linux) development environment this project is maintained from, so changes to `autorun.bat` are normally only read and edited as text, never executed, before a real Windows run confirms or refutes them — see ⁷ for the one exception so far, and its result.
-⁶ Verified with the real `pwsh` installed in this environment: on this Linux machine, the Auto-Detect branch correctly resolves to `linux`; with `$IsLinux`/`$IsMacOS` forcibly cleared to simulate Windows PowerShell 5.1 (where those variables don't exist), it correctly falls back to `windows`. Confirms the detection logic itself is correct on every OS conceptually, but the Windows and macOS rows are still marked unit-tested-equivalent rather than fully runtime-tested, since neither a real Windows PowerShell 5.1 host nor a real macOS `pwsh` was available to also confirm it end-to-end there.
-⁷ Actually run on real Windows (Go 1.26.5, `windows/amd64`), not just cross-compiled: the launcher ran, found/provisioned a working Go toolchain, exercised `--hard` purge mode, and both `gofmt` and `go vet` passed clean. `go test` surfaced one real failure, `TestCheckCliAliasSafeToClaim_PathLookupCollision` — diagnosed as a test-only bug (an extension-less fake file that Windows' `exec.LookPath` can never match, not a production defect) and fixed in a later commit, which has **not** been re-verified by another real Windows run. This is also where the `autorun.bat` `[!]`-rendering-as-`[]` bug (see the row above) was first observed and reported, and is likewise fixed but not yet re-confirmed on real Windows.
+¹ Run end-to-end with the cross-platform `pwsh` available in the Linux development environment, under a real PTY: the PowerShell parser reported 0 syntax errors, `exit` inside `try` was confirmed to still run `finally` (and preserve the exit code), and the captured output showed exactly one alternate-screen enter and exit sequence, in the right order, around the menu's cancel path. What that genuinely confirms: the script's own control flow and the bytes it emits are correct. What it cannot confirm: whether a real Windows `conhost`/Windows Terminal actually renders `\x1b[?1049h`/`l` as true alternate-screen switching, or anything else about running `autorun.ps1` on an actual Windows machine — no Windows host has run it yet.
+² Actually run on real Windows (Go 1.26.5, `windows/amd64`), via `.\autorun.bat --hard` with the Auto-Detect menu option, from an Administrator PowerShell session — not just cross-compiled or read as text. Confirmed working: the Go toolchain was found, `--hard` purge mode ran, `gofmt`, `go mod tidy`, and `go vet` all passed clean, every unit test passed (including `TestCheckCliAliasSafeToClaim_PathLookupCollision`, the one that failed on an earlier real run and was fixed in between), the build succeeded, and the compiled binary launched correctly in its own elevated window, with the original PowerShell window returning control afterward. The `[!]`-rendering-as-`[]` fix was confirmed: warning/error lines rendered their `[!]` marker correctly. `git status` stayed clean afterward too, confirming the `.gitattributes` CRLF normalization for `.bat`/`.ps1` doesn't produce a spurious diff on a real Windows checkout. **Not** confirmed by this run: interactive main-menu navigation specifically (arrow keys, selecting an option), whether pre-existing console scrollback survives the screen clear (see ³), or anything the binary does once elevated beyond launching and returning cleanly — see the feature rows below for those. This run used only `autorun.bat`; `autorun.ps1` was not exercised on this or any other real Windows host (see ¹).
+³ Confirmed by the same real-Windows run described in ²: the tool launched, the clear-and-redraw sequence ran without error, and control returned cleanly to the original PowerShell window afterward. Not confirmed: whether console lines printed before the tool started remained present/scrollable after the clear — no before/after scrollback comparison was performed on that run, so this is marked distinctly from the `[!]` fix, which was directly observed.
+⁴ Cross-compiles cleanly for `darwin/amd64` and `darwin/arm64`, and `go vet`/`go test -c` type-check the macOS-specific Go code; `autorun.sh` itself has not been run on a real macOS host.
+⁵ This engagement's safety rules forbade making real install/enable/service/network/firewall changes on any machine used for development — every mutating feature has solid input-validation unit tests, but the feature as a whole has not been exercised against a live system.
+⁶ Verified with the real `pwsh` installed in the Linux development environment: on that machine, the Auto-Detect branch correctly resolves to `linux`; with `$IsLinux`/`$IsMacOS` forcibly cleared to simulate Windows PowerShell 5.1 (where those variables don't exist), it correctly falls back to `windows`. Confirms the detection logic itself is correct on every OS conceptually, but the Windows and macOS rows are still marked unit-tested-equivalent rather than fully runtime-tested, since neither a real Windows PowerShell 5.1 host nor a real macOS `pwsh` has confirmed it end-to-end there.
+⁷ The original Linux GUI ↔ TTY "hang" fix — the very first issue this project's audit chain investigated — has only ever been reasoned about and tested indirectly, via terminal-restore tests in a tmux pane on the one development machine used throughout this work. It has **not** been confirmed end to end (a real desktop session actually stopping, and a real TTY1 login prompt actually appearing) on a second, independent machine by someone else. Treat it as plausible, not confirmed.
+⁸ Deliberately never executed anywhere, including on Linux where the menu itself was runtime-tested — every confirmation prompt was reached and cancelled, never confirmed. See the manual VM checklist in this repo's own audit history for the exact steps to runtime-verify it.
+⁹ No real Windows host has been available at any point in this project's history to observe whether `SetConsoleScreenBufferSize`/`SetConsoleWindowInfo` ever actually fail in practice, or whether the fallback path added for that case behaves correctly when they do. The real Windows run described in ² confirms the binary launches and runs without crashing, which is consistent with this working correctly but doesn't specifically exercise it either way.
 
 ---
 
