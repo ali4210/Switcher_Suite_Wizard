@@ -365,6 +365,7 @@ flowchart TD
 | **Set permanent static IP** | Applies through `nmcli` / `networksetup` / `netsh`, with CIDR + gateway validation |
 | **Set temporary IP** | Applies immediately, reverts on reboot |
 | **Add/delete secondary alias** | Bind or remove a secondary IPv4 address without disturbing the primary |
+| **Virtual/container adapters filtered out** | Docker (`docker0`/`veth*`/`br-*`/`virbr*`) and bridge/libvirt adapters on Linux, Hyper-V/WSL/VPN adapters (`vEthernet`, `TAP-Windows`, `WireGuard`, …) on Windows, and the existing `bridge`/`utun`/`llw`/`awdl` filtering on macOS — none of these make sense to assign a static IP to from this picker |
 
 </details>
 
@@ -433,6 +434,8 @@ Each phase reports pass/fail with details, and every applied fix is logged inlin
 | **Idempotent by design** | Already installed, enabled, and running? The menu offers "Re-Confirm ... Is Enabled" instead of repeating the full install flow — running it again is always safe either way |
 | **One confirmation to change anything** | Shows exactly what will happen (install the package, validate the config, enable + start the service) before asking once |
 | **Firewall is a separate decision** | If `ufw`/`firewalld` (Linux) or Windows Defender Firewall is active and doesn't already allow SSH, a **second, independent confirmation** offers to open it — Windows's rule is restricted to the Private/Domain profiles, never Public, and nothing firewall-related changes unless you say yes to that specific prompt |
+| **Firewall rule targets the real port** | The rule opened is whatever port the server actually listens on (validated as 1–65535), not a hardcoded 22 — falling back to 22 only if the real port genuinely can't be confirmed, and saying so |
+| **Disable removes only what this tool created** | If enabling SSH had to create a new firewall rule, that fact is recorded; disabling SSH later removes exactly that rule and never one that already existed beforehand (e.g. one the OS itself or you created) |
 | **Lockout-aware disable** | Disabling while the running session's own `SSH_CONNECTION` is set shows an explicit warning (with the actual connection string) and requires its own confirmation, instead of the normal one-line prompt |
 | **Real errors, not fake success** | A failed config test, install, or service start is reported with the actual command output — never a hardcoded "done" |
 | **Platform specifics** | Linux: detects `apt`/`dnf`/`yum`/`pacman`/`zypper`/`apk`, runs `ssh-keygen -A` + `sshd -t` before touching the service, handles `ssh.socket` activation. Windows: `Get-WindowsCapability`/`Add-WindowsCapability`, service set to Automatic. macOS: toggles the built-in Remote Login service (`systemsetup -setremotelogin`); no separate firewall step is needed since it's a system service, not an app |
@@ -481,15 +484,16 @@ Cache control: plain run reuses caches for speed, `-f` clears build/test caches 
 
 ## 🖵 Terminal Behavior
 
-Running `./autorun.sh` (or the compiled binary directly) never disturbs whatever was already on your screen.
+Running `./autorun.sh` (or the compiled binary directly) never disturbs whatever was already on your screen. `autorun.ps1` follows the same approach; `autorun.bat` uses a simpler, lower-risk fallback — see the row-level notes and [Tested On](#tested) for exactly what's been verified on each.
 
 | Behavior | Details |
 |---|---|
-| **Alternate screen, like `vim`/`less`** | The wrapper enters the terminal's alternate screen before printing anything (banner, build output, the binary's own menu), and leaves it on every exit path — normal quit, `Ctrl+C`, `SIGTERM`, `SIGHUP`, closed stdin/EOF, or a build error. Your original screen and scrollback are restored exactly; nothing from the session leaks into your shell history |
-| **No scrollback wipe** | Only cursor-home + erase-within-the-alternate-screen sequences are used — never a scrollback-erasing `clear`/`\033[3J`. (A previous version's `clear` call at startup did wipe scrollback; it's gone) |
+| **Alternate screen, like `vim`/`less`** | `autorun.sh` and `autorun.ps1` enter the terminal's alternate screen before printing anything (banner, build output, the binary's own menu), and leave it on every exit path — normal quit, `Ctrl+C`, `SIGTERM`/`SIGHUP` (`autorun.sh`), a cancelled selection, or a build error. Your original screen and scrollback are restored exactly; nothing from the session leaks into your shell history |
+| **No scrollback wipe** | Only cursor-home + erase-within-the-alternate-screen sequences are used — never a scrollback-erasing `clear`/`\033[3J`/`Clear-Host`. (A previous version's `clear` call on Linux/macOS, and `Clear-Host`/`cls` on Windows, did wipe scrollback; both are gone) |
+| **`autorun.bat`'s simpler fallback** | Rather than a full alternate-screen retrofit of batch's much less structured control flow, `autorun.bat` replaces `cls` with the same safe erase-display sequence used elsewhere — it still stops the history wipe, just without the enter/restore bookkeeping the other two launchers have |
 | **Single ownership, no nesting** | When `autorun.sh` launches the compiled binary, it passes `--alt-screen-managed` so the binary doesn't also try to enter/leave the alternate screen — the two never fight over who owns it |
 | **Errors stay readable** | If the build fails, the alternate screen is left *first*, then the error is printed — so it lands on your real terminal, not a buffer about to disappear |
-| **Skipped when it would get in the way** | `--help` and any non-interactive/piped invocation never touch the alternate screen at all |
+| **Skipped when it would get in the way** | `--help` and any non-interactive/piped invocation never touch the alternate screen at all, on any of the three launchers |
 | **Correct colors** | ANSI color codes render as actual colors in every code path, including ones that pass a color variable through `printf`'s `%s` (a previous version could print literal `\033[...m` text instead in that specific path) |
 
 ---
@@ -537,6 +541,8 @@ Switcher Suite Wizard changes system-level state, so every risky action is gated
 | `HKLM\...\Winlogon\Shell` | 🪟 | Registry key updated when setting the next-boot startup shell |
 | `/etc/hosts.switcher.bak` | 🐧 | Backup of `/etc/hosts` taken before the Hostname Manager merges in the new self-mapping |
 | `/tmp/switcher-switch.log` | 🐧 | Append-only log of what the detached GUI/TTY mode-switch script actually did — check here first if a switch doesn't visibly take effect within ~10 seconds |
+| `/etc/switcher-suite-wizard/ssh_firewall_rule.state` | 🐧 🍎 | Records which SSH firewall rule, if any, this tool itself created, so disabling SSH later removes exactly that rule and never one that already existed. A fixed system path, not the current directory — this and the project directory are two different, unrelated locations |
+| `ProgramData\SwitcherSuiteWizard\ssh_firewall_rule.state` | 🪟 | Same purpose, Windows equivalent path |
 
 ---
 
@@ -588,21 +594,29 @@ An honest account of how each feature has actually been verified, not just what 
 
 | Feature | 🐧 Linux | 🪟 Windows | 🍎 macOS |
 |---|:-:|:-:|:-:|
-| Terminal alternate-screen / scrollback safety | ✅ Runtime-tested | ⬜ Not tested | ⬜ Not tested |
+| Terminal alternate-screen / scrollback safety (`autorun.sh`) | ✅ Runtime-tested | n/a | ✅ Runtime-tested (same script) |
+| `autorun.ps1` alternate-screen / scrollback safety | n/a | 🟡 Script logic verified⁴, console rendering not | n/a |
+| `autorun.bat` history-safe clear | n/a | ⬜ Not tested⁵ | n/a |
 | Build wrapper (`autorun.sh` / `.bat` / `.ps1`) | ✅ Runtime-tested | 🟡 Unit-tested only¹ | 🟡 Unit-tested only¹ |
 | Main menu navigation & Global CLI collision checks | ✅ Runtime-tested (nav) + 🟡 unit-tested (collision logic) | 🟡 Unit-tested only | 🟡 Unit-tested only |
+| `autorun.ps1` Auto-Detect host-platform logic | 🟡 Script logic verified via `pwsh`⁶ | 🟡 Script logic verified via `pwsh`⁶ | 🟡 Script logic verified via `pwsh`⁶ |
 | System Mode Switcher (GUI ↔ TTY/CLI) | ⬜ Not tested² | ⬜ Not tested² | n/a (not supported by design) |
 | Hostname Manager (set / rollback / `/etc/hosts` merge+backup) | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
-| IP Address Manager | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
+| IP Address Manager (incl. virtual-adapter filtering) | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
 | DNS Resolver Switcher | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
-| Proxy Configuration (incl. IPv6 endpoint handling) | 🟡 Unit-tested only | 🟡 Unit-tested only | 🟡 Unit-tested only |
+| Proxy Configuration (incl. IPv6 endpoint handling, WinHTTP read-back) | 🟡 Unit-tested only | 🟡 Unit-tested only | 🟡 Unit-tested only |
 | Automated Network Troubleshooter | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
 | SSH Server — status / idempotency decision | ✅ Runtime-tested (read-only) | 🟡 Unit-tested only | 🟡 Unit-tested only |
+| SSH Server — firewall rule targets the real port, not hardcoded 22 | 🟡 Unit-tested only | 🟡 Unit-tested only | n/a (no firewall step) |
 | SSH Server — install/enable/disable/firewall mutation | ⬜ Not tested³ | ⬜ Not tested³ | ⬜ Not tested³ |
+| Windows console buffer/window fallback-on-failure handling | n/a | ⬜ Not tested⁵ | n/a |
 
 ¹ Cross-compiles cleanly and `go vet`/`go test -c` type-check its OS-specific Go code; the shell/batch/PowerShell script itself has only actually been *run* on Linux.
 ² This engagement's safety rules forbade making real install/enable/service/network changes on the machine used for development — every mutating feature has solid input-validation unit tests, but the feature as a whole has not been exercised against a live system since the original audit that preceded this work.
 ³ Deliberately never executed anywhere, including on Linux where the menu itself was runtime-tested — every confirmation prompt was reached and cancelled, never confirmed. See the manual VM checklist in this repo's own change history for the exact steps to runtime-verify it.
+⁴ Run end-to-end with the cross-platform `pwsh` available in this (Linux) development environment, under a real PTY: the PowerShell parser reported 0 syntax errors, `exit` inside `try` was confirmed to still run `finally` (and preserve the exit code), and the captured output showed exactly one alternate-screen enter and exit sequence, in the right order, around the menu's cancel path. What that genuinely confirms: the script's own control flow and the bytes it emits are correct. What it cannot confirm: whether a real Windows `conhost`/Windows Terminal actually renders `\x1b[?1049h`/`l` as true alternate-screen switching — no Windows host was available in this engagement.
+⁵ No `cmd.exe` interpreter is available in this (Linux) development environment at all, so `autorun.bat` could not be executed or have its control flow verified in any way — only read and edited as text.
+⁶ Verified with the real `pwsh` installed in this environment: on this Linux machine, the Auto-Detect branch correctly resolves to `linux`; with `$IsLinux`/`$IsMacOS` forcibly cleared to simulate Windows PowerShell 5.1 (where those variables don't exist), it correctly falls back to `windows`. Confirms the detection logic itself is correct on every OS conceptually, but the Windows and macOS rows are still marked unit-tested-equivalent rather than fully runtime-tested, since neither a real Windows PowerShell 5.1 host nor a real macOS `pwsh` was available to also confirm it end-to-end there.
 
 ---
 
