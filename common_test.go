@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -764,7 +765,22 @@ func TestCheckCliAliasSafeToClaim_DirectoryAtCandidatePath(t *testing.T) {
 
 func TestCheckCliAliasSafeToClaim_PathLookupCollision(t *testing.T) {
 	dir := t.TempDir()
-	foreign := filepath.Join(dir, "myalias")
+	name := "myalias"
+	if runtime.GOOS == "windows" {
+		// exec.LookPath on Windows only matches a PATHEXT-listed
+		// extension (.com/.exe/.bat/.cmd by default) when the looked-up
+		// name itself has none -- confirmed directly against Go's own
+		// os/exec source (lp_windows.go's findExecutable): with a
+		// non-empty extension list it tries "name"+ext for each ext,
+		// never the bare name. Production always calls with a bare
+		// alias name (e.g. "sw"), so this is also exactly how a real
+		// collision (a real file named sw.exe/sw.cmd/etc.) gets found
+		// in practice -- an extension-less fake file like POSIX uses
+		// below would never be found there, unlike on POSIX where any
+		// executable-bit file matches regardless of name.
+		name += ".exe"
+	}
+	foreign := filepath.Join(dir, name)
 	if err := os.WriteFile(foreign, []byte("#!/bin/bash\necho hi\n"), 0755); err != nil {
 		t.Fatalf("setup WriteFile failed: %v", err)
 	}
@@ -773,6 +789,9 @@ func TestCheckCliAliasSafeToClaim_PathLookupCollision(t *testing.T) {
 
 	// No candidatePaths at all -- the collision must still be caught via
 	// exec.LookPath against PATH, not just the explicit candidate list.
+	// The lookup name itself stays bare ("myalias") on every OS, matching
+	// the real production call pattern -- only the fake collision file's
+	// name above needs the platform-appropriate extension to be found.
 	if err := checkCliAliasSafeToClaim("myalias", nil); err == nil {
 		t.Error("checkCliAliasSafeToClaim expected error for a PATH collision with no shim marker, got nil")
 	}

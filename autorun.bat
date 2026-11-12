@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions
 chcp 437 >nul
 
 REM ==============================================================================
@@ -32,6 +32,27 @@ set "CYAN=%ESC%[0;36m"
 set "BOLD=%ESC%[1m"
 set "DIM=%ESC%[2m"
 set "NC=%ESC%[0m"
+
+REM A literal "!" character, captured now while delayed expansion is
+REM still off, so lines below can print "[!BANG!]" instead of a bare
+REM "!". Once EnableDelayedExpansion turns on just below, a bare "!"
+REM anywhere -- including, confusingly, inside a parenthesized if/for
+REM block, which needs an even less obvious double-caret ^^! escape to
+REM survive there specifically -- is otherwise silently consumed by
+REM cmd's own delayed-expansion scanning before it ever reaches the
+REM screen (that exact bug: "[!]" rendering as "[]").
+REM
+REM This MUST be referenced as !BANG!, not %BANG%: cmd expands %VAR%
+REM first, then still runs its delayed-expansion scan over the
+REM resulting text -- so a %BANG% substitution would leave behind the
+REM exact same bare, unpaired "!" the scan already eats, just arrived
+REM at indirectly. !BANG! is different: it's substituted directly by
+REM that same delayed-expansion mechanism (a single pass, not
+REM recursive), so the "!" its own value contains is never re-scanned
+REM as the start of another token.
+set "BANG=!"
+
+setlocal EnableDelayedExpansion
 
 REM cls resets the whole console screen buffer on Windows -- there is no
 REM separate "scrollback" concept the way Linux terminals have, so it
@@ -91,7 +112,7 @@ REM has to parse the art text as commands (avoids all %/encoding pitfalls)
 if exist "%PROJECT_DIR%banner_wrapper.txt" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '%PROJECT_DIR%banner_wrapper.txt' | Write-Host -ForegroundColor Cyan"
 ) else (
-    echo %YELLOW%[!]%NC% banner_wrapper.txt not found - skipping ASCII art.
+    echo %YELLOW%[!BANG!]%NC% banner_wrapper.txt not found - skipping ASCII art.
 )
 echo.
 
@@ -141,7 +162,7 @@ if /i "%OS_CHOICE%"=="Q" (
 )
 
 echo.
-echo %RED%[!] Invalid selection. Defaulting to Windows.%NC%
+echo %RED%[!BANG!] Invalid selection. Defaulting to Windows.%NC%
 set "TARGET_OS=windows"
 set "TARGET_ARCH=amd64"
 set "BINARY_NAME=Switcher_Suite_Wizard.exe"
@@ -197,7 +218,7 @@ if exist "%LOCAL_GO_DIR%\bin\go.exe" (
 )
 
 REM Fallback: Automated Rapid Toolchain Download and Ultra-Fast Unpacking
-echo %YELLOW%[!]%NC% No Go compiler detected in PATH or system folders.
+echo %YELLOW%[!BANG!]%NC% No Go compiler detected in PATH or system folders.
 echo %CYAN%[+]%NC% Auto-provisioning Go %GO_BOOTSTRAP_VERSION% portable toolchain...
 
 if not exist "%PROJECT_DIR%.cache" mkdir "%PROJECT_DIR%.cache"
@@ -217,7 +238,7 @@ if %errorlevel% equ 0 (
 if not exist "%ZIP_DEST%" (
     echo.
     echo %RED%[X]%NC% Failed to download Go toolchain.
-    echo %YELLOW%[!]%NC% Check internet connectivity or install Go manually from https://go.dev/dl/
+    echo %YELLOW%[!BANG!]%NC% Check internet connectivity or install Go manually from https://go.dev/dl/
     echo.
     pause
     exit /b 1
@@ -258,7 +279,7 @@ echo %GREEN%[OK]%NC% Self-healing complete. Provisioned: !GO_VERSION_STR!
 
 :verify_environment
 if not exist "go.mod" (
-    echo %YELLOW%[!]%NC% go.mod not found. Initializing module 'switcher'...
+    echo %YELLOW%[!BANG!]%NC% go.mod not found. Initializing module 'switcher'...
     "%GO_BIN%" mod init switcher >nul 2>nul
 )
 echo %GREEN%[OK]%NC% Go module integrity confirmed.
@@ -284,7 +305,7 @@ goto :run_build_pipeline
 :execute_force
 echo.
 echo %BOLD%%CYAN%--- FORCE REBUILD MODE ---%NC%
-echo %YELLOW%[!]%NC% Purging previous binaries and cleaning build/test cache...
+echo %YELLOW%[!BANG!]%NC% Purging previous binaries and cleaning build/test cache...
 
 call :kill_running_instance
 
@@ -304,7 +325,7 @@ goto :run_build_pipeline
 :execute_hard
 echo.
 echo %BOLD%%CYAN%--- HARD PURGE MODE ---%NC%
-echo %YELLOW%[!]%NC% Executing full cache, test, and fuzz purge...
+echo %YELLOW%[!BANG!]%NC% Executing full cache, test, and fuzz purge...
 
 call :kill_running_instance
 
@@ -332,7 +353,7 @@ REM ----------------------------------------------------------------------------
 :kill_running_instance
 tasklist /fi "imagename eq %BINARY_NAME%" 2>nul | find /i "%BINARY_NAME%" >nul
 if %errorlevel% equ 0 (
-    echo %YELLOW%[!]%NC% Terminating running instance of %BINARY_NAME%...
+    echo %YELLOW%[!BANG!]%NC% Terminating running instance of %BINARY_NAME%...
     taskkill /f /im "%BINARY_NAME%" >nul 2>nul
     timeout /t 1 /nobreak >nul
 )
@@ -368,7 +389,7 @@ if exist "vendor" (
     echo %CYAN%[+]%NC% Synchronizing module dependencies with go mod tidy...
     "%GO_BIN%" mod tidy >nul 2>nul
     if errorlevel 1 (
-        echo %YELLOW%[!]%NC% Remote synchronization offline. Continuing with cached modules...
+        echo %YELLOW%[!BANG!]%NC% Remote synchronization offline. Continuing with cached modules...
     ) else (
         echo %GREEN%[OK]%NC% Dependencies verified and synchronized.
     )
@@ -387,7 +408,7 @@ if defined BUILD_VENDOR_FLAG (
 if errorlevel 1 (
     echo.
     echo %RED%[X]%NC% Static analysis detected errors.
-    echo %YELLOW%[!]%NC% Please fix the issues identified above before compiling.
+    echo %YELLOW%[!BANG!]%NC% Please fix the issues identified above before compiling.
     echo.
     pause
     exit /b 1
@@ -412,7 +433,7 @@ if exist "*_test.go" (
     )
     echo %GREEN%[OK]%NC% All tests passed successfully.
 ) else (
-    echo %YELLOW%[!]%NC% No unit test files found. Skipping testing phase.
+    echo %YELLOW%[!BANG!]%NC% No unit test files found. Skipping testing phase.
 )
 
 echo.
@@ -432,7 +453,7 @@ if defined BUILD_VENDOR_FLAG (
 if errorlevel 1 (
     echo.
     echo %RED%[X]%NC% Compilation failed.
-    echo %YELLOW%[!]%NC% Check the compiler output above for details.
+    echo %YELLOW%[!BANG!]%NC% Check the compiler output above for details.
     echo.
     pause
     exit /b 1
@@ -446,7 +467,7 @@ if not exist "%BINARY_NAME%" (
     exit /b 1
 )
 
-echo %GREEN%[OK]%NC% Build successful!
+echo %GREEN%[OK]%NC% Build successful!BANG!
 echo %GREEN%[OK]%NC% Target Binary: %CD%\%BINARY_NAME%
 
 REM ------------------------------------------------------------------------------
@@ -473,14 +494,14 @@ if "!TARGET_OS!"=="windows" (
             exit /b 0
         ) else (
             echo.
-            echo %RED%[!]%NC% Elevation prompt was cancelled or denied.
+            echo %RED%[!BANG!]%NC% Elevation prompt was cancelled or denied.
             pause
             exit /b 1
         )
     )
 ) else (
     echo.
-    echo %BOLD%%GREEN%[OK] CROSS-COMPILATION COMPLETE!%NC%
+    echo %BOLD%%GREEN%[OK] CROSS-COMPILATION COMPLETE!BANG!%NC%
     echo %YELLOW%[i] Standalone executable package generated for '!TARGET_OS!'.%NC%
     echo %YELLOW%[i] Ready to transfer and execute at: %CD%\%BINARY_NAME%%NC%
     echo.
@@ -493,7 +514,7 @@ echo.
 if "%APP_EXIT_CODE%"=="0" (
     echo %GREEN%[OK]%NC% Switcher Suite session terminated normally.
 ) else (
-    echo %YELLOW%[!]%NC% Switcher Suite exited with code %APP_EXIT_CODE%.
+    echo %YELLOW%[!BANG!]%NC% Switcher Suite exited with code %APP_EXIT_CODE%.
 )
 
 echo.
