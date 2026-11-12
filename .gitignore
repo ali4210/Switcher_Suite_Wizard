@@ -7,9 +7,9 @@
 /.switcher_previous_hostname
 /.switcher_default_hostname
 /.switcher_proxy_config
-/.switcher_ssh_firewall_rule
 bin/
 *.log
 .DS_Store
 /FINAL_AUDIT_REPORT.md
 /FINAL_AUDIT_REPORT_v2.md
+/FINAL_AUDIT_REPORT_v3.md
