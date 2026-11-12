@@ -21,7 +21,13 @@ REM the version the build itself requires. This fallback value is used only
 REM if go.mod is missing or its go line can't be found.
 set "GO_BOOTSTRAP_VERSION=1.26.5"
 if exist "%PROJECT_DIR%go.mod" (
-    for /f "usebackq tokens=2" %%v in (`findstr /b /r "go [0-9]" "%PROJECT_DIR%go.mod"`) do set "GO_BOOTSTRAP_VERSION=%%v"
+    set "GO_BOOTSTRAP_VERSION_FOUND="
+    for /f "usebackq tokens=2" %%v in (`findstr /b /c:"go " "%PROJECT_DIR%go.mod"`) do (
+        if not defined GO_BOOTSTRAP_VERSION_FOUND (
+            set "GO_BOOTSTRAP_VERSION=%%v"
+            set "GO_BOOTSTRAP_VERSION_FOUND=1"
+        )
+    )
 )
 set "GO_ZIP_URL=https://go.dev/dl/go%GO_BOOTSTRAP_VERSION%.windows-amd64.zip"
 set "MODE=%~1"
