@@ -434,7 +434,7 @@ Each phase reports pass/fail with details, and every applied fix is logged inlin
 | **Idempotent by design** | Already installed, enabled, and running? The menu offers "Re-Confirm ... Is Enabled" instead of repeating the full install flow — running it again is always safe either way |
 | **One confirmation to change anything** | Shows exactly what will happen (install the package, validate the config, enable + start the service) before asking once |
 | **Firewall is a separate decision** | If `ufw`/`firewalld` (Linux) or Windows Defender Firewall is active and doesn't already allow SSH, a **second, independent confirmation** offers to open it — Windows's rule is restricted to the Private/Domain profiles, never Public, and nothing firewall-related changes unless you say yes to that specific prompt |
-| **Firewall rule targets the real port** | The rule opened is whatever port the server actually listens on (validated as 1–65535), not a hardcoded 22 — falling back to 22 only if the real port genuinely can't be confirmed, and saying so |
+| **Firewall rule targets the real port** | The rule opened is whatever port the server actually listens on (validated as 1–65535), not a hardcoded 22 — falling back to 22 only if the real port genuinely can't be confirmed, and saying so. **Known limitation:** on `firewalld` (Linux), the rule is only ever added to the *default* zone — a primary interface explicitly assigned to a non-default zone would not be covered, and this isn't currently detected or flagged |
 | **Disable removes only what this tool created** | If enabling SSH had to create a new firewall rule, that fact is recorded; disabling SSH later removes exactly that rule and never one that already existed beforehand (e.g. one the OS itself or you created) |
 | **Lockout-aware disable** | Disabling while the running session's own `SSH_CONNECTION` is set shows an explicit warning (with the actual connection string) and requires its own confirmation, instead of the normal one-line prompt |
 | **Real errors, not fake success** | A failed config test, install, or service start is reported with the actual command output — never a hardcoded "done" |
@@ -596,9 +596,9 @@ An honest account of how each feature has actually been verified, not just what 
 |---|:-:|:-:|:-:|
 | Terminal alternate-screen / scrollback safety (`autorun.sh`) | ✅ Runtime-tested | n/a | ✅ Runtime-tested (same script) |
 | `autorun.ps1` alternate-screen / scrollback safety | n/a | 🟡 Script logic verified⁴, console rendering not | n/a |
-| `autorun.bat` history-safe clear | n/a | ⬜ Not tested⁵ | n/a |
-| Build wrapper (`autorun.sh` / `.bat` / `.ps1`) | ✅ Runtime-tested | 🟡 Unit-tested only¹ | 🟡 Unit-tested only¹ |
-| Main menu navigation & Global CLI collision checks | ✅ Runtime-tested (nav) + 🟡 unit-tested (collision logic) | 🟡 Unit-tested only | 🟡 Unit-tested only |
+| `autorun.bat` history-safe clear | n/a | ⬜ Not tested⁵ (the `[!]`/delayed-expansion fix specifically, made after this run) | n/a |
+| Build wrapper (`autorun.sh` / `.bat` / `.ps1`) | ✅ Runtime-tested | ✅ Runtime-tested⁷ | 🟡 Unit-tested only¹ |
+| Main menu navigation & Global CLI collision checks | ✅ Runtime-tested (nav) + 🟡 unit-tested (collision logic) | 🟡 Unit tests executed for real⁷ (one failure found there, fixed here, not yet re-verified) | 🟡 Unit-tested only |
 | `autorun.ps1` Auto-Detect host-platform logic | 🟡 Script logic verified via `pwsh`⁶ | 🟡 Script logic verified via `pwsh`⁶ | 🟡 Script logic verified via `pwsh`⁶ |
 | System Mode Switcher (GUI ↔ TTY/CLI) | ⬜ Not tested² | ⬜ Not tested² | n/a (not supported by design) |
 | Hostname Manager (set / rollback / `/etc/hosts` merge+backup) | ⬜ Not tested² | ⬜ Not tested² | ⬜ Not tested² |
@@ -611,12 +611,13 @@ An honest account of how each feature has actually been verified, not just what 
 | SSH Server — install/enable/disable/firewall mutation | ⬜ Not tested³ | ⬜ Not tested³ | ⬜ Not tested³ |
 | Windows console buffer/window fallback-on-failure handling | n/a | ⬜ Not tested⁵ | n/a |
 
-¹ Cross-compiles cleanly and `go vet`/`go test -c` type-check its OS-specific Go code; the shell/batch/PowerShell script itself has only actually been *run* on Linux.
+¹ Cross-compiles cleanly and `go vet`/`go test -c` type-check its OS-specific Go code; the shell/PowerShell script itself has only actually been *run* on Linux (`autorun.bat` has now also been run for real on Windows — see ⁷).
 ² This engagement's safety rules forbade making real install/enable/service/network changes on the machine used for development — every mutating feature has solid input-validation unit tests, but the feature as a whole has not been exercised against a live system since the original audit that preceded this work.
 ³ Deliberately never executed anywhere, including on Linux where the menu itself was runtime-tested — every confirmation prompt was reached and cancelled, never confirmed. See the manual VM checklist in this repo's own change history for the exact steps to runtime-verify it.
 ⁴ Run end-to-end with the cross-platform `pwsh` available in this (Linux) development environment, under a real PTY: the PowerShell parser reported 0 syntax errors, `exit` inside `try` was confirmed to still run `finally` (and preserve the exit code), and the captured output showed exactly one alternate-screen enter and exit sequence, in the right order, around the menu's cancel path. What that genuinely confirms: the script's own control flow and the bytes it emits are correct. What it cannot confirm: whether a real Windows `conhost`/Windows Terminal actually renders `\x1b[?1049h`/`l` as true alternate-screen switching — no Windows host was available in this engagement.
-⁵ No `cmd.exe` interpreter is available in this (Linux) development environment at all, so `autorun.bat` could not be executed or have its control flow verified in any way — only read and edited as text.
+⁵ No `cmd.exe` interpreter is available in the primary (Linux) development environment this project is maintained from, so changes to `autorun.bat` are normally only read and edited as text, never executed, before a real Windows run confirms or refutes them — see ⁷ for the one exception so far, and its result.
 ⁶ Verified with the real `pwsh` installed in this environment: on this Linux machine, the Auto-Detect branch correctly resolves to `linux`; with `$IsLinux`/`$IsMacOS` forcibly cleared to simulate Windows PowerShell 5.1 (where those variables don't exist), it correctly falls back to `windows`. Confirms the detection logic itself is correct on every OS conceptually, but the Windows and macOS rows are still marked unit-tested-equivalent rather than fully runtime-tested, since neither a real Windows PowerShell 5.1 host nor a real macOS `pwsh` was available to also confirm it end-to-end there.
+⁷ Actually run on real Windows (Go 1.26.5, `windows/amd64`), not just cross-compiled: the launcher ran, found/provisioned a working Go toolchain, exercised `--hard` purge mode, and both `gofmt` and `go vet` passed clean. `go test` surfaced one real failure, `TestCheckCliAliasSafeToClaim_PathLookupCollision` — diagnosed as a test-only bug (an extension-less fake file that Windows' `exec.LookPath` can never match, not a production defect) and fixed in a later commit, which has **not** been re-verified by another real Windows run. This is also where the `autorun.bat` `[!]`-rendering-as-`[]` bug (see the row above) was first observed and reported, and is likewise fixed but not yet re-confirmed on real Windows.
 
 ---
 
