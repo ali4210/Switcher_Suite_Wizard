@@ -33,6 +33,22 @@ set "BOLD=%ESC%[1m"
 set "DIM=%ESC%[2m"
 set "NC=%ESC%[0m"
 
+REM cls resets the whole console screen buffer on Windows -- there is no
+REM separate "scrollback" concept the way Linux terminals have, so it
+REM wipes history outright. CLS_SAFE instead emits the ANSI "erase
+REM display" + cursor-home sequence (same ESC code this script already
+REM relies on for its own colors above, so VT processing is already an
+REM existing assumption here, not a new one), which on a VT-capable host
+REM (Windows Terminal, or modern conhost with VT processing on) clears
+REM only what's currently visible and leaves scrollback intact. Simpler,
+REM lower-risk than a full alternate-screen retrofit (unlike autorun.ps1,
+REM this file's batch control flow has ~16 separate exit points with no
+REM try/finally equivalent to guarantee cleanup on all of them, and there
+REM is no cmd.exe available in this environment to verify such a
+REM restructure against at all) -- this still directly fixes the
+REM complained-about symptom (history wipe) with much less risk.
+set "CLS_SAFE=%ESC%[H%ESC%[2J"
+
 REM ------------------------------------------------------------------------------
 REM Argument Pre-Check: Help
 REM ------------------------------------------------------------------------------
@@ -43,7 +59,9 @@ if /I "%MODE%"=="-?" goto :show_help
 goto :display_wrapper_menu
 
 :show_help
-cls
+REM Never clears anything -- matches autorun.sh's/autorun.ps1's own
+REM --help behavior: a quick informational dump should never wipe
+REM whatever was already on the user's screen.
 echo.
 echo %BOLD%Usage:%NC%
 echo   autorun.bat            Interactive Multi-OS selector, build, and launch
@@ -66,7 +84,7 @@ REM ----------------------------------------------------------------------------
 REM Step 1: Interactive Multi-OS Target Selection Wrapper with Favorite Art
 REM ------------------------------------------------------------------------------
 :display_wrapper_menu
-cls
+echo %CLS_SAFE%
 
 REM ASCII Portrait Renderer - pulled from a separate file so cmd.exe never
 REM has to parse the art text as commands (avoids all %/encoding pitfalls)
