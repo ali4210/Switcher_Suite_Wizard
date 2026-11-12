@@ -1,0 +1,48 @@
+# Pin line endings so they don't depend on whoever happens to check the
+# repo out, or on core.autocrlf settings nobody remembers they have set.
+#
+# Default: every text file normalizes to LF in the repo, and checks out
+# as LF too, except the Windows launchers explicitly listed below (.bat/
+# .cmd/.ps1), which need real CRLF to behave correctly as native Windows
+# scripts. Binaries are explicitly marked -text so Git never touches
+# their bytes at all.
+
+* text=auto eol=lf
+
+# Go source and modules
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# Docs and plain text
+*.md text eol=lf
+*.txt text eol=lf
+
+# Config / data formats likely to show up here later
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# Windows launchers: real CRLF, not LF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binaries: never normalized, diffed, or otherwise touched
+*.exe -text
+*.dll -text
+*.so -text
+*.dylib -text
+*.a -text
+*.o -text
+*.zip -text
+*.tar -text
+*.gz -text
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.ico -text
