@@ -39,10 +39,23 @@ try {
 # ------------------------------------------------------------------------------
 # Core Environment Paths and Configuration
 # ------------------------------------------------------------------------------
-$ProjectDir         = Split-Path -Parent $MyInvocation.MyCommand.Path
-$LocalGoDir         = Join-Path $ProjectDir ".go_runtime"
-$GoBootstrapVersion = "1.24.0"
-$GoZipUrl           = "https://go.dev/dl/go$GoBootstrapVersion.windows-amd64.zip"
+$ProjectDir                 = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LocalGoDir                 = Join-Path $ProjectDir ".go_runtime"
+
+# Single source of truth for the bootstrap download version: go.mod's own
+# "go X.Y.Z" directive, read live so this can never drift out of sync with
+# the version the build itself requires. GoBootstrapVersionFallback is used
+# only if go.mod is missing or its go line can't be parsed.
+$GoBootstrapVersionFallback = "1.26.5"
+$GoBootstrapVersion         = $GoBootstrapVersionFallback
+$goModPath                  = Join-Path $ProjectDir "go.mod"
+if (Test-Path -LiteralPath $goModPath) {
+    $goModMatch = Select-String -LiteralPath $goModPath -Pattern '^go\s+(\d+\.\d+(?:\.\d+)?)' | Select-Object -First 1
+    if ($goModMatch) {
+        $GoBootstrapVersion = $goModMatch.Matches[0].Groups[1].Value
+    }
+}
+$GoZipUrl = "https://go.dev/dl/go$GoBootstrapVersion.windows-amd64.zip"
 
 Set-Location -Path $ProjectDir
 

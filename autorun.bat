@@ -14,7 +14,15 @@ REM ============================================================================
 
 set "PROJECT_DIR=%~dp0"
 set "LOCAL_GO_DIR=%PROJECT_DIR%.go_runtime"
-set "GO_BOOTSTRAP_VERSION=1.24.0"
+
+REM Single source of truth for the bootstrap download version: go.mod's own
+REM "go X.Y.Z" directive, read live so this can never drift out of sync with
+REM the version the build itself requires. This fallback value is used only
+REM if go.mod is missing or its go line can't be found.
+set "GO_BOOTSTRAP_VERSION=1.26.5"
+if exist "%PROJECT_DIR%go.mod" (
+    for /f "usebackq tokens=2" %%v in (`findstr /b /r "go [0-9]" "%PROJECT_DIR%go.mod"`) do set "GO_BOOTSTRAP_VERSION=%%v"
+)
 set "GO_ZIP_URL=https://go.dev/dl/go%GO_BOOTSTRAP_VERSION%.windows-amd64.zip"
 set "MODE=%~1"
 
