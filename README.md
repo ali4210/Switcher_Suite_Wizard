@@ -156,6 +156,9 @@ Then either:
 1. Right-click **`autorun.bat`** → **Run as administrator**, or
 2. Open PowerShell and run **`.\autorun.ps1`** (self-elevates via UAC if needed)
 
+> [!WARNING]
+> Always run the batch launcher as **`.\autorun.bat`** from inside the project folder (in PowerShell) — never bare `autorun.bat` with no path. PowerShell resolves a bare command name against `PATH` *before* the current directory, so if anything else named `autorun.bat` exists anywhere on `PATH` (another tool, an old global install, a colleague's script), that's what runs instead of this project's own launcher, silently. `.\autorun.bat` (or `cmd /c autorun.bat` from a `cmd.exe` prompt, where the current directory is checked first by default) always means *this* file. The same applies to `./autorun.sh` on Linux/macOS, which the rest of this README already uses consistently.
+
 ### 🚑 No Go toolchain, and the network is already broken?
 
 Skip the build entirely:
