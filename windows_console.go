@@ -72,7 +72,18 @@ func ensureWindowsConsole() {
 	}
 
 	packedBuf := uintptr(uint16(bufCols)) | uintptr(uint16(bufRows))<<16
-	_, _, _ = switcherProcSetConsoleScreenBufferSize.Call(uintptr(stdout), packedBuf)
+	rBuf, _, _ := switcherProcSetConsoleScreenBufferSize.Call(uintptr(stdout), packedBuf)
+	if rBuf == 0 {
+		// Resizing the buffer failed (e.g. a legacy conhost quirk, or a
+		// window currently maximized/pinned by the shell hosting us) --
+		// leave the window alone too rather than request a window size
+		// Win32 would then also reject (SetConsoleWindowInfo requires
+		// the window to fit within the buffer), which could otherwise
+		// leave buffer and window sizes in a mismatched state. Nothing
+		// here is worse off than before this function ran: the console
+		// simply keeps whatever size it already had.
+		return
+	}
 
 	// Safely expand visible window without shrinking to 1x1 first
 	rect := windows.SmallRect{
@@ -81,5 +92,12 @@ func ensureWindowsConsole() {
 		Right:  targetCols - 1,
 		Bottom: targetRows - 1,
 	}
-	_, _, _ = switcherProcSetConsoleWindowInfo.Call(uintptr(stdout), 1, uintptr(unsafe.Pointer(&rect)))
+	rWin, _, _ := switcherProcSetConsoleWindowInfo.Call(uintptr(stdout), 1, uintptr(unsafe.Pointer(&rect)))
+	if rWin == 0 {
+		// Best-effort: the buffer is already at the target size even if
+		// the visible window couldn't be expanded to match (e.g. the
+		// physical display is smaller than targetCols/targetRows would
+		// need). Nothing further to do.
+		return
+	}
 }

@@ -2,6 +2,7 @@
 /Switcher_Suite_Wizard.exe
 /Switcher_Suite_Wizard_macOS
 /switcher
+/switcher.exe
 /.switcher_cli_command
 /.switcher_previous_hostname
 /.switcher_default_hostname
@@ -11,3 +12,4 @@ bin/
 .DS_Store
 /FINAL_AUDIT_REPORT.md
 /FINAL_AUDIT_REPORT_v2.md
+/FINAL_AUDIT_REPORT_v3.md

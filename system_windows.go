@@ -173,18 +173,75 @@ func getCurrentProxy() string {
 
 	// 2. Check WinHTTP Subsystem (System)
 	outWinHTTP, errWinHTTP := runCommand("netsh", "winhttp", "show", "proxy")
-	if errWinHTTP == nil && strings.Contains(outWinHTTP, "Proxy Server(s) :") {
-		for _, line := range strings.Split(outWinHTTP, "\n") {
-			if strings.Contains(line, "Proxy Server(s) :") {
-				parts := strings.Split(line, ":")
-				if len(parts) >= 2 {
-					return strings.TrimSpace(parts[1])
-				}
-			}
+	if errWinHTTP == nil {
+		if value := parseWinHTTPProxyOutput(outWinHTTP); value != "" {
+			return value
 		}
 	}
 
 	return "DIRECT (Disabled)"
+}
+
+// parseWinHTTPProxyOutput extracts the "Proxy Server(s)" value from
+// `netsh winhttp show proxy` output, e.g. a line like
+// "    Proxy Server(s) :  127.0.0.1:8080". Previously this was read by
+// naively splitting the whole line on every colon and taking the second
+// field -- which silently dropped the port, since a line like that
+// contains two colons, not one (N12). Slicing past the known marker
+// text instead of splitting on ":" fixes that regardless of how many
+// colons the value itself contains. If the value parses as a
+// host:port (via net.SplitHostPort, which understands bracketed IPv6),
+// it's re-rendered via net.JoinHostPort for a canonical bracketed form;
+// otherwise the trimmed raw value is returned as-is rather than
+// erroring out, since this is a read/display-only path.
+func parseWinHTTPProxyOutput(output string) string {
+	const marker = "Proxy Server(s) :"
+	for _, line := range strings.Split(output, "\n") {
+		idx := strings.Index(line, marker)
+		if idx == -1 {
+			continue
+		}
+		value := strings.TrimSpace(line[idx+len(marker):])
+		if value == "" {
+			return ""
+		}
+		if host, port, err := net.SplitHostPort(value); err == nil {
+			return net.JoinHostPort(host, port)
+		}
+		return value
+	}
+	return ""
+}
+
+// windowsVirtualInterfaceSubstrings lists common virtual-adapter name
+// patterns `netsh interface show interface` can list that don't make
+// sense to offer in this tool's static-IP picker: Hyper-V/WSL virtual
+// switches (vEthernet) and a few of the most common VPN client/loopback
+// adapter names. Necessarily best-effort and non-exhaustive -- VPN
+// vendors name their adapters differently -- mirroring macOS's own
+// filtering (isDarwinVirtualInterface) as closely as Windows's much
+// less standardized adapter naming allows; anything not on this list is
+// still shown, just not filtered.
+var windowsVirtualInterfaceSubstrings = []string{
+	"vEthernet",
+	"TAP-Windows",
+	"Npcap Loopback",
+	"WireGuard",
+}
+
+// isWindowsVirtualInterface reports whether name is the loopback
+// pseudo-interface or a common virtual/VPN adapter this tool's IP
+// picker should not offer.
+func isWindowsVirtualInterface(name string) bool {
+	if strings.EqualFold(name, "Loopback Pseudo-Interface 1") {
+		return true
+	}
+	for _, s := range windowsVirtualInterfaceSubstrings {
+		if strings.Contains(name, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func getNetworkInterfaces() []string {
@@ -215,7 +272,7 @@ func getNetworkInterfaces() []string {
 		}
 
 		iface := strings.Join(fields[3:], " ")
-		if strings.EqualFold(iface, "Loopback Pseudo-Interface 1") {
+		if isWindowsVirtualInterface(iface) {
 			continue
 		}
 
@@ -921,10 +978,26 @@ func buildWindowsFirewallRuleExistsScript() string {
 	return `if (Get-NetFirewallRule -Name ` + windowsSSHFirewallRule + ` -ErrorAction SilentlyContinue) { "True" } else { "False" }`
 }
 
-func buildWindowsFirewallRuleCreateScript() string {
-	return `New-NetFirewallRule -Name ` + windowsSSHFirewallRule +
-		` -DisplayName "OpenSSH Server (sshd)" -Enabled True -Direction Inbound` +
-		` -Protocol TCP -Action Allow -LocalPort 22 -Profile Private,Domain`
+// buildWindowsFirewallRulePortScript returns the existing rule's
+// configured LocalPort, if any -- used to confirm a pre-existing rule
+// (one this tool didn't create) actually covers the real SSH port,
+// rather than assuming any rule with the right Name is good enough.
+func buildWindowsFirewallRulePortScript() string {
+	return `(Get-NetFirewallPortFilter -AssociatedNetFirewallRule (Get-NetFirewallRule -Name ` +
+		windowsSSHFirewallRule + ` -ErrorAction SilentlyContinue) -ErrorAction SilentlyContinue).LocalPort`
+}
+
+// buildWindowsFirewallRuleCreateScript takes a strictly-typed int (never
+// a raw string), same reasoning as buildWindowsListeningPortCheckScript.
+func buildWindowsFirewallRuleCreateScript(port int) string {
+	return fmt.Sprintf(
+		`New-NetFirewallRule -Name %s -DisplayName "OpenSSH Server (sshd)" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort %d -Profile Private,Domain`,
+		windowsSSHFirewallRule, port,
+	)
+}
+
+func buildWindowsFirewallRuleRemoveScript() string {
+	return `Remove-NetFirewallRule -Name ` + windowsSSHFirewallRule + ` -ErrorAction SilentlyContinue`
 }
 
 // buildWindowsListeningPortCheckScript takes a strictly-typed int (never a
@@ -958,6 +1031,20 @@ func parseWindowsServiceStartTypeOutput(output string) bool {
 // `if (...) { "True" } else { "False" }`-style scripts always print.
 func parseWindowsBoolOutput(output string) bool {
 	return strings.TrimSpace(output) == "True"
+}
+
+// parseWindowsFirewallRulePortOutput parses
+// buildWindowsFirewallRulePortScript's LocalPort output. ok is false if
+// the rule doesn't exist (empty output) or LocalPort isn't a plain
+// integer (e.g. a port range or "Any", which this tool never creates
+// itself, so a pre-existing rule like that is correctly treated as not
+// confirmed to match).
+func parseWindowsFirewallRulePortOutput(output string) (port int, ok bool) {
+	p, err := strconv.Atoi(strings.TrimSpace(output))
+	if err != nil {
+		return 0, false
+	}
+	return p, true
 }
 
 // parseWindowsSSHDConfigPort extracts the effective "Port" directive from
@@ -1004,13 +1091,34 @@ func getSSHServerStatus() (SSHServerStatus, error) {
 		}
 	}
 
+	// The firewall check below must confirm the rule covers the SSH
+	// server's real port, never just assume any rule with the right
+	// Name is good enough -- fall back to 22 only when the real port
+	// genuinely couldn't be confirmed above, and say so -- but only
+	// once we know the firewall is active (i.e. a port check will
+	// actually happen below), so the note is never shown when the
+	// firewall is off and no such check occurs at all.
+	checkPort, usedFallback := sshPortOrFallback(status.ListeningPort, defaultWindowsSSHPort)
+
 	status.FirewallTool = "Windows Defender Firewall"
 	if out, err := runWindowsPowerShell(buildWindowsFirewallEnabledScript()); err == nil {
 		status.FirewallActive = parseWindowsBoolOutput(out)
 	}
 	if status.FirewallActive {
-		if out, err := runWindowsPowerShell(buildWindowsFirewallRuleExistsScript()); err == nil {
-			status.FirewallAllowsSSH = parseWindowsBoolOutput(out)
+		if usedFallback {
+			note := fmt.Sprintf("Could not confirm the real listening port; firewall status below is checked against the default port %d.", defaultWindowsSSHPort)
+			if status.Detail == "" {
+				status.Detail = note
+			} else {
+				status.Detail += " " + note
+			}
+		}
+		if existsOut, err := runWindowsPowerShell(buildWindowsFirewallRuleExistsScript()); err == nil && parseWindowsBoolOutput(existsOut) {
+			if portOut, err := runWindowsPowerShell(buildWindowsFirewallRulePortScript()); err == nil {
+				if rulePort, ok := parseWindowsFirewallRulePortOutput(portOut); ok {
+					status.FirewallAllowsSSH = rulePort == checkPort
+				}
+			}
 		}
 	}
 
@@ -1063,9 +1171,56 @@ func disableSSHServer() (string, error) {
 	return "SSH server disabled (stopped, and will not start on boot). The OpenSSH Server Windows capability itself was left installed.", nil
 }
 
-func ensureFirewallAllowsSSH() (string, error) {
-	if out, err := runWindowsPowerShell(buildWindowsFirewallRuleCreateScript()); err != nil {
+func ensureFirewallAllowsSSH(port int) (string, error) {
+	validPort, usedFallback := sshPortOrFallback(port, defaultWindowsSSHPort)
+
+	var note string
+	if usedFallback {
+		note = fmt.Sprintf(" (could not confirm the real listening port, so the firewall rule targets the default port %d instead)", defaultWindowsSSHPort)
+	}
+
+	existsOut, existsErr := runWindowsPowerShell(buildWindowsFirewallRuleExistsScript())
+	if existsErr == nil && parseWindowsBoolOutput(existsOut) {
+		portOut, portErr := runWindowsPowerShell(buildWindowsFirewallRulePortScript())
+		if portErr == nil {
+			if rulePort, ok := parseWindowsFirewallRulePortOutput(portOut); ok && rulePort == validPort {
+				return fmt.Sprintf("Firewall rule %q already allows SSH on port %d -- nothing to change.%s", windowsSSHFirewallRule, validPort, note), nil
+			}
+		}
+		// A rule with this exact Name already exists but doesn't match
+		// the port we need -- refuse to touch it rather than silently
+		// overwrite something this tool didn't create (it may be the
+		// one OpenSSH's own installer creates automatically).
+		return "", fmt.Errorf(
+			"a firewall rule named %q already exists but its LocalPort does not match %d -- remove or rename it manually before retrying, so this tool never overwrites a rule it didn't create",
+			windowsSSHFirewallRule, validPort,
+		)
+	}
+
+	if out, err := runWindowsPowerShell(buildWindowsFirewallRuleCreateScript(validPort)); err != nil {
 		return "", fmt.Errorf("failed to create the %s firewall rule: %w\n%s", windowsSSHFirewallRule, err, out)
 	}
-	return fmt.Sprintf("Firewall rule %q created (Private/Domain profiles only).", windowsSSHFirewallRule), nil
+
+	saveSSHFirewallRuleRecord("windows", validPort)
+
+	return fmt.Sprintf("Firewall rule %q created for port %d (Private/Domain profiles only).%s", windowsSSHFirewallRule, validPort, note), nil
+}
+
+// removeSSHFirewallRule removes the OpenSSH-Server-In-TCP rule only if
+// this tool's own record (sshFirewallRuleRecordFile, system_common.go)
+// says it created it -- never a rule that already existed beforehand,
+// such as one OpenSSH's own installer creates automatically.
+func removeSSHFirewallRule() (string, error) {
+	tool, port, ok := getSSHFirewallRuleRecord()
+	if !ok || tool != "windows" {
+		return "No firewall rule was created by this tool -- nothing to remove.", nil
+	}
+
+	if out, err := runWindowsPowerShell(buildWindowsFirewallRuleRemoveScript()); err != nil {
+		return "", fmt.Errorf("failed to remove the %s firewall rule: %w\n%s", windowsSSHFirewallRule, err, out)
+	}
+
+	removeSSHFirewallRuleRecord()
+
+	return fmt.Sprintf("Firewall rule %q (port %d, added by this tool) removed.", windowsSSHFirewallRule, port), nil
 }

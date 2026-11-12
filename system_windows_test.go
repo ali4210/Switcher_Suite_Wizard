@@ -174,23 +174,60 @@ func TestWindowsSSHScriptBuildersAreFixedLiterals(t *testing.T) {
 }
 
 func TestBuildWindowsFirewallRuleCreateScript(t *testing.T) {
-	script := buildWindowsFirewallRuleCreateScript()
-	for _, want := range []string{
-		"-Name OpenSSH-Server-In-TCP",
-		"-Direction Inbound",
-		"-Protocol TCP",
-		"-Action Allow",
-		"-LocalPort 22",
-		"-Profile Private,Domain",
-	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("buildWindowsFirewallRuleCreateScript() missing %q in:\n%s", want, script)
+	cases := []struct {
+		port     int
+		wantPort string
+	}{
+		{22, "-LocalPort 22"},
+		{2222, "-LocalPort 2222"},
+	}
+	for _, c := range cases {
+		script := buildWindowsFirewallRuleCreateScript(c.port)
+		for _, want := range []string{
+			"-Name OpenSSH-Server-In-TCP",
+			"-Direction Inbound",
+			"-Protocol TCP",
+			"-Action Allow",
+			c.wantPort,
+			"-Profile Private,Domain",
+		} {
+			if !strings.Contains(script, want) {
+				t.Errorf("buildWindowsFirewallRuleCreateScript(%d) missing %q in:\n%s", c.port, want, script)
+			}
+		}
+		// Never Public -- the task explicitly forbids opening the
+		// firewall rule to all profiles.
+		if strings.Contains(script, "Public") {
+			t.Errorf("buildWindowsFirewallRuleCreateScript(%d) must never include the Public profile:\n%s", c.port, script)
 		}
 	}
-	// Never Public -- the task explicitly forbids opening the firewall
-	// rule to all profiles.
-	if strings.Contains(script, "Public") {
-		t.Errorf("buildWindowsFirewallRuleCreateScript() must never include the Public profile:\n%s", script)
+}
+
+func TestBuildWindowsFirewallRuleRemoveScript(t *testing.T) {
+	script := buildWindowsFirewallRuleRemoveScript()
+	want := `Remove-NetFirewallRule -Name OpenSSH-Server-In-TCP -ErrorAction SilentlyContinue`
+	if script != want {
+		t.Errorf("buildWindowsFirewallRuleRemoveScript() = %q, want %q", script, want)
+	}
+}
+
+func TestParseWindowsFirewallRulePortOutput(t *testing.T) {
+	cases := []struct {
+		name     string
+		output   string
+		wantPort int
+		wantOK   bool
+	}{
+		{"standard port", "22\n", 22, true},
+		{"custom port", "2222\n", 2222, true},
+		{"no rule (empty output)", "", 0, false},
+		{"non-numeric (e.g. a port range or \"Any\")", "Any\n", 0, false},
+	}
+	for _, c := range cases {
+		port, ok := parseWindowsFirewallRulePortOutput(c.output)
+		if port != c.wantPort || ok != c.wantOK {
+			t.Errorf("%s: parseWindowsFirewallRulePortOutput(%q) = (%d, %v), want (%d, %v)", c.name, c.output, port, ok, c.wantPort, c.wantOK)
+		}
 	}
 }
 
@@ -290,6 +327,80 @@ func TestParseWindowsSSHDConfigPort(t *testing.T) {
 	for _, c := range cases {
 		if got := parseWindowsSSHDConfigPort(c.output); got != c.want {
 			t.Errorf("%s: parseWindowsSSHDConfigPort(...) = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestParseWinHTTPProxyOutput is the regression test for N12: the old
+// naive strings.Split(line, ":") dropped the port because the real
+// `netsh winhttp show proxy` line contains two colons ("Proxy Server(s)
+// :  host:port"), not one.
+func TestParseWinHTTPProxyOutput(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			name: "IPv4 host:port -- must keep the port (N12 regression)",
+			output: "Current WinHTTP proxy settings:\n\n" +
+				"    Proxy Server(s) :  127.0.0.1:8080\n" +
+				"    Bypass List     :  (none)\n",
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "hostname:port",
+			output: "Current WinHTTP proxy settings:\n\n" +
+				"    Proxy Server(s) :  proxy.company.com:3128\n",
+			want: "proxy.company.com:3128",
+		},
+		{
+			name: "bracketed IPv6 host:port stays bracketed",
+			output: "Current WinHTTP proxy settings:\n\n" +
+				"    Proxy Server(s) :  [::1]:8080\n",
+			want: "[::1]:8080",
+		},
+		{
+			name: "direct access configured -- no Proxy Server(s) line",
+			output: "Current WinHTTP proxy settings:\n\n" +
+				"    Direct access (no proxy server).\n",
+			want: "",
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   "",
+		},
+	}
+	for _, c := range cases {
+		if got := parseWinHTTPProxyOutput(c.output); got != c.want {
+			t.Errorf("%s: parseWinHTTPProxyOutput(...) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestIsWindowsVirtualInterface is the regression test for N8: the
+// Windows interface picker previously excluded only the loopback
+// pseudo-interface, unlike macOS's picker which also excludes its own
+// virtual-adapter prefixes.
+func TestIsWindowsVirtualInterface(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"Loopback Pseudo-Interface 1", true},
+		{"vEthernet (Default Switch)", true},
+		{"vEthernet (WSL)", true},
+		{"TAP-Windows Adapter V9", true},
+		{"Npcap Loopback Adapter", true},
+		{"WireGuard Tunnel", true},
+		{"Ethernet", false},
+		{"Wi-Fi", false},
+		{"Local Area Connection", false},
+	}
+	for _, c := range cases {
+		if got := isWindowsVirtualInterface(c.name); got != c.want {
+			t.Errorf("isWindowsVirtualInterface(%q) = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

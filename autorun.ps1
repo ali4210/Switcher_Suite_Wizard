@@ -64,10 +64,65 @@ $global:GoBin      = $null
 $global:GofmtBin   = $null
 
 # ------------------------------------------------------------------------------
+# Alternate-Screen Handling
+#
+# Clear-Host resets the whole console screen buffer on Windows -- there is
+# no separate "scrollback" concept the way Linux terminals have, so it
+# wipes history exactly like a bare `clear` did on Linux before that was
+# fixed (see autorun.sh). Entering the alternate screen buffer via VT
+# sequences and only ever clearing *within* it avoids that; restored on
+# every exit path by the try/finally around the main flow below, since
+# PowerShell runs a `finally` block even when `exit` is called from
+# inside the corresponding `try` (verified: a bare `exit N` inside try
+# still prints from finally and preserves exit code N). Best-effort and
+# unverified on a real Windows console -- no Windows host is available
+# in this environment.
+# ------------------------------------------------------------------------------
+$script:AltScreenActive = $false
+
+function Test-UseAltScreen {
+    return ($Host.Name -eq "ConsoleHost") -and (-not [Console]::IsOutputRedirected)
+}
+
+function Enter-AltScreen {
+    if (Test-UseAltScreen) {
+        Write-Host -NoNewline "$ESC[?1049h$ESC[H$ESC[2J"
+        $script:AltScreenActive = $true
+    }
+}
+
+function Leave-AltScreen {
+    if ($script:AltScreenActive) {
+        Write-Host -NoNewline "$ESC[0m$ESC[?25h$ESC[?1049l"
+        $script:AltScreenActive = $false
+    }
+}
+
+# Best-effort Ctrl+C handling: the native Windows mechanism for it
+# (CTRL_C_EVENT) is exactly what [Console]::CancelKeyPress intercepts,
+# but this cannot be exercised from this Linux environment (POSIX
+# signals sent via `kill` to a non-interactive pwsh here do not reach
+# it at all, confirmed while testing this), so it is wrapped in try/catch
+# -- matching this file's own existing defensive style for the window-
+# resize block above -- and left unverified rather than relied upon.
+try {
+    [Console]::CancelKeyPress.Add({
+        param($sender, $e)
+        Leave-AltScreen
+    })
+} catch {
+    # Not available in this host (e.g. redirected/non-interactive) --
+    # the try/finally around the main flow below still covers every
+    # normal exit and `exit`-based error path regardless.
+}
+
+# ------------------------------------------------------------------------------
 # Argument Pre-Check: Help
 # ------------------------------------------------------------------------------
 function Show-HelpScreen {
-    Clear-Host
+    # Never touches the alternate screen or clears anything -- matches
+    # autorun.sh's own --help behavior (Phase 1): a quick informational
+    # dump should never wipe whatever was already on the user's screen.
     Write-Host ""
     Write-Host "${BOLD}Usage:${NC}"
     Write-Host "  .\autorun.ps1            Interactive Multi-OS selector, build, and launch"
@@ -95,7 +150,7 @@ if ($Mode -in @("-h", "--help", "help", "-?")) {
 # Step 1: Interactive Multi-OS Target Selection Wrapper with Favorite Art
 # ------------------------------------------------------------------------------
 function Display-WrapperMenu {
-    Clear-Host
+    Enter-AltScreen
     $bannerPath = Join-Path $ProjectDir "banner_wrapper.txt"
     if (Test-Path $bannerPath) {
         Get-Content -LiteralPath $bannerPath | Write-Host -ForegroundColor Cyan
@@ -133,9 +188,24 @@ function Display-WrapperMenu {
             $global:BinaryName = "Switcher_Suite_Wizard_macOS"
         }
         "4" {
-            $global:TargetOS   = "windows"
-            $global:TargetArch = "amd64"
-            $global:BinaryName = "Switcher_Suite_Wizard.exe"
+            # $IsLinux/$IsMacOS/$IsWindows only exist on PowerShell
+            # 6+/Core (which runs cross-platform); on Windows PowerShell
+            # 5.1 they are simply undefined ($null, which is falsy here)
+            # -- and 5.1 only ever runs on Windows anyway, so falling
+            # through to the Windows branch below is correct either way.
+            if ($IsLinux) {
+                $global:TargetOS   = "linux"
+                $global:TargetArch = "amd64"
+                $global:BinaryName = "Switcher_Suite_Wizard"
+            } elseif ($IsMacOS) {
+                $global:TargetOS   = "darwin"
+                $global:TargetArch = "amd64"
+                $global:BinaryName = "Switcher_Suite_Wizard_macOS"
+            } else {
+                $global:TargetOS   = "windows"
+                $global:TargetArch = "amd64"
+                $global:BinaryName = "Switcher_Suite_Wizard.exe"
+            }
         }
         "Q" {
             Write-Host "`n${YELLOW}=> Operation cancelled by user.${NC}"
@@ -149,6 +219,15 @@ function Display-WrapperMenu {
         }
     }
 }
+
+# Everything from here to the end of the script runs inside this single
+# try/finally so Leave-AltScreen fires on every exit path: normal
+# completion, any of the `exit N` calls below -- including the ones
+# inside Display-WrapperMenu itself, e.g. its "Q" cancel case, which is
+# exactly why the call is inside this try and not before it -- (verified:
+# `exit` inside a try still runs the matching finally and preserves the
+# exit code), or an uncaught terminating error.
+try {
 
 Display-WrapperMenu
 
@@ -463,4 +542,8 @@ if ($global:TargetOS -eq "windows") {
     Write-Host "${YELLOW}[i] Ready to transfer and execute at: $ProjectDir\$($global:BinaryName)${NC}`n"
     Read-Host "Press ENTER to exit..."
     exit 0
+}
+
+} finally {
+    Leave-AltScreen
 }
